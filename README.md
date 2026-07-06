@@ -51,9 +51,11 @@ and the `champions` mod (new megas, e.g. Floettite → Floette-Mega). If a
 different pin lacks the named format, the env falls back to
 `gen9doublescustomgame`.
 
-Point `Config.node_dir` at the directory containing `node_modules` (default
-`artifacts/node`; the Colab notebook symlinks it), and `Config.checkpoint_dir`
-at Google Drive when on Colab.
+No root on the box? The notebook's setup cell installs Node from the official
+standalone tarball into `artifacts/node-dist` instead (no apt needed) and puts
+it on PATH. Point `Config.node_dir` at the directory containing `node_modules`
+(default `artifacts/node`), and `Config.checkpoint_dir` at Google Drive when
+on Colab (the notebook offers this automatically).
 
 ## Phase 1 — data + predictor
 
@@ -408,7 +410,7 @@ All gated behind flags; zero cost when off ([search/debug.py](search/debug.py)):
 | [observe_game.py](observe_game.py) | Step-through self-play viewer of beliefs/predictions/strategy/value. Exists because a bot you can't watch thinking can't be debugged. |
 | [teams.py](teams.py) | 10 replica Reg M-B teams (real tournament archetypes) + export parser + sim-validator + dataset team miner. Exists so human games start from realistic, legal, varied matchups. |
 | [play.py](play.py) | Human-vs-bot orchestration: local server spawn, chooser menu, live "bot thoughts" dashboard. Exists so a human can actually fight — and read — the bot without any custom battle GUI. |
-| [colab.ipynb](colab.ipynb) | End-to-end pipeline on Colab Pro (A100/L4), resumable from Drive artifacts. Exists so the whole pipeline runs on rented strong compute. |
+| [colab.ipynb](colab.ipynb) | End-to-end pipeline on any Jupyter GPU box (remote A100/L4, Colab Pro) — rootless Node bootstrap, skip-if-present data download. Exists so the whole pipeline runs on rented strong compute. |
 
 ### Scaling to strong hardware
 
