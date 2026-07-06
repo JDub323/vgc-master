@@ -1,0 +1,16 @@
+# Python (verified current on PyPI 2026-07-03)
+torch==2.12.1
+numpy==2.5.0
+huggingface-hub==1.21.0
+poke-env==0.15.0
+tensorboard==2.21.0
+tqdm==4.67.1
+
+# Node (not pip-installable; run in the repo root — colab.ipynb does this):
+#   npm install github:smogon/pokemon-showdown#e440c4a18385274f10c405d0b158b6a962ce6d94
+#   npm install @smogon/calc@0.11.0
+#
+# The pokemon-showdown npm release (0.11.10, Feb 2025) predates Pokemon Champions
+# entirely — no gen9championsvgc2026* formats, no Champions megas — so we pin a
+# git commit of the community repo instead (2026-07-02, has the `champions` and
+# `championsregma` mods). @smogon/calc 0.11.0 is from 2026-03-11, post-Champions.
