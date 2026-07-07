@@ -20,7 +20,7 @@ genuinely novel set (off-meta mon, custom spread) can kill every particle and
 force the prior fallback. `python beliefs.py --audit` measures how often that
 happens on held-out battles (depletion rate, whether the oracle set was even
 in the prior, and how much posterior mass it ends with). If the audit shows
-frequent depletion the fix is widening the prior — e.g. per-species EV-spread
+frequent depletion the fix is widening the prior — e.g. per-species SP-spread
 variants inferred from damage-roll residuals — not patching the filter.
 """
 
@@ -55,12 +55,18 @@ def load_dex(cfg=CFG):
     return _DEX_CACHE[p]
 
 
-def calc_stat(base, stat, nature, ev=0, iv=31, level=50):
+MAX_SP = 32   # Champions stat-point cap per stat (66 total, IVs forced to 31)
+
+
+def calc_stat(base, stat, nature, sp=0):
+    """Champions flat formula (the mod's statModify, level-independent):
+    HP = base + SP + 75, others = base + SP + 20, nature +/-10% after
+    (integer math matches the mod's tr(tr(stat*110,16)/100))."""
     if stat == "hp":
-        return (2 * base + iv + ev // 4) * level // 100 + level + 10
-    v = (2 * base + iv + ev // 4) * level // 100 + 5
+        return base + sp + 75
+    v = base + sp + 20
     up, down = NATURES.get(nature, ("", ""))
-    return int(v * (1.1 if stat == up else 0.9 if stat == down else 1.0))
+    return v * 110 // 100 if stat == up else v * 90 // 100 if stat == down else v
 
 
 def boost_mult(b):
@@ -77,10 +83,14 @@ class OpponentBelief:
         self.weights = []                   # per mon: list of floats
         self.priors = []
         for sp in opp_species:
+            # usage rows may carry a 6th element: a known SP spread (authored
+            # scenarios / determinized own team); real sheets redact it
             sets = [{"moves": tuple(mv), "item": it, "ability": ab, "nature": na,
-                     "n": c} for c, mv, it, ab, na in usage.get(sp, [])]
+                     "evs": rest[0] if rest else None, "n": c}
+                    for c, mv, it, ab, na, *rest in usage.get(sp, [])]
             if not sets:
-                sets = [{"moves": (), "item": "", "ability": "", "nature": "serious", "n": 1}]
+                sets = [{"moves": (), "item": "", "ability": "", "nature": "serious",
+                     "evs": None, "n": 1}]
             sets = sets[:cfg.n_particles]
             total = sum(s["n"] for s in sets)
             self.particles.append(sets)
@@ -101,11 +111,11 @@ class OpponentBelief:
             return None
         return self.dex["species"][species]["baseStats"][stat]
 
-    def _particle_speed(self, k, p, ctx=None):
+    def _particle_speed(self, k, p, ctx=None, sp=0):
         base = self._base(self.species[k], "spe")
         if base is None:
             return None
-        spe = calc_stat(base, "spe", p["nature"])
+        spe = calc_stat(base, "spe", p["nature"], sp)
         if p["item"] == "choicescarf" and not self.constraints[k]["consumed"]:
             spe = int(spe * 1.5)
         if ctx:
@@ -116,12 +126,12 @@ class OpponentBelief:
                 spe *= 0.5
         return spe
 
-    def _my_speed(self, idx, ctx):
+    def _my_speed(self, idx, ctx, sp=None):
         s = self.my_team[idx]
         base = self._base(_sid(s["species"]), "spe")
         if base is None:
             return None
-        spe = calc_stat(base, "spe", s["nature"], ev=s["evs"][5])
+        spe = calc_stat(base, "spe", s["nature"], s["evs"][5] if sp is None else sp)
         if s["item"] == "choicescarf":
             spe = int(spe * 1.5)
         spe *= boost_mult(ctx["spe"])
@@ -209,13 +219,19 @@ class OpponentBelief:
                 if glob["tr"]:
                     first = not first    # trick room: slower acts first
                 k = o_idx
-                slack = self.cfg.investment_slack  # hidden training, both sides
+                # stat training is hidden on both sides, so the inequality is
+                # one-sided: whichever side must be faster is evaluated at the
+                # SP cap (exact bound, replaces the old multiplicative slack)
+                mine_hi = self._my_speed(m_idx, m_ctx, sp=MAX_SP)
 
-                def ok(p, mine=mine, first=first, k=k, ctx=o_ctx, slack=slack):
+                def ok(p, mine=mine, mine_hi=mine_hi, first=first, k=k, ctx=o_ctx):
                     theirs = self._particle_speed(k, p, ctx)
                     if theirs is None:
                         return True
-                    return theirs * slack >= mine if first else mine * slack >= theirs
+                    if first:
+                        theirs_hi = self._particle_speed(k, p, ctx, sp=MAX_SP)
+                        return theirs_hi >= mine
+                    return mine_hi >= theirs
 
                 self._apply(k, ok)
 
@@ -233,8 +249,8 @@ class OpponentBelief:
             return
         truncated = frac >= ctx["def_hp_before"] - 1e-6
         tol = self.cfg.damage_tolerance
-        inv = self.cfg.investment_slack   # hidden attack investment raises damage,
-        their_attack = atk_side == opp    # hidden bulk investment lowers it
+        their_attack = atk_side == opp    # hidden attack SP raises damage,
+        #                                   hidden bulk SP lowers it
         field = {"weather": ctx["weather"], "terrain": ctx["terrain"],
                  "screens": ctx["screens"]}
 
@@ -246,6 +262,7 @@ class OpponentBelief:
                    "evs": d["evs"], "boosts": ctx["def_boosts"]}
             reqs = [request(self._as_attacker(k, p, ctx), dfd, move, field)
                     for p in self.particles[k]]
+            slacks = [self._atk_slack(k, p, move) for p in self.particles[k]]
         elif atk_side == viewer and self.my_team:  # our attack, their unknown defender
             k = def_idx
             a = self.my_team[atk_idx]
@@ -255,23 +272,48 @@ class OpponentBelief:
                    "status": "brn" if ctx["burn"] else ""}
             reqs = [request(atk, self._as_defender(k, p, ctx), move, field)
                     for p in self.particles[k]]
+            slacks = [self._bulk_slack(k, p, move) for p in self.particles[k]]
         else:
             return
         res = self.bridge.calc_batch(reqs)
 
-        def ok(r):
+        def ok(r, s):
             if r is None:
                 return 1.0
             lo, hi = r
-            if their_attack:      # their unknown atk investment can only add
-                lo, hi = lo, hi * inv
-            else:                 # their unknown bulk investment can only subtract
-                lo, hi = lo / inv, hi
+            if their_attack:      # their unknown atk SP can only add
+                hi = hi * s
+            else:                 # their unknown bulk SP can only subtract
+                lo = lo * s
             if truncated:
                 return float(hi >= frac - tol)
             return float(lo - tol <= frac <= hi + tol)
 
-        self._apply_list(k, [ok(r) for r in res])
+        self._apply_list(k, [ok(r, s) for r, s in zip(res, slacks)])
+
+    def _atk_slack(self, k, p, move):
+        """Largest multiplier hidden attack SP (0..MAX_SP, redacted on team
+        sheets) can put on this particle's damage: the calc ran at SP 0, and
+        damage is linear in the attack stat modulo rounding."""
+        cat = (self.dex or {}).get("moves", {}).get(move, {}).get("category")
+        key = "atk" if cat == "Physical" else "spa"
+        base = self._base(self._species_cur(k), key)
+        if base is None or not cat:
+            return self.cfg.investment_slack
+        return calc_stat(base, key, p["nature"], MAX_SP) / calc_stat(base, key, p["nature"])
+
+    def _bulk_slack(self, k, p, move):
+        """Smallest factor hidden bulk SP can shrink the observed damage
+        fraction to: frac = dmg/maxhp scales as 1/(defense * HP)."""
+        cat = (self.dex or {}).get("moves", {}).get(move, {}).get("category")
+        key = "def" if cat == "Physical" else "spd"
+        sid = self._species_cur(k)
+        bd, bh = self._base(sid, key), self._base(sid, "hp")
+        if bd is None or bh is None or not cat:
+            return 1 / self.cfg.investment_slack
+        n = p["nature"]
+        return (calc_stat(bd, key, n) * calc_stat(bh, "hp", n)) / (
+            calc_stat(bd, key, n, MAX_SP) * calc_stat(bh, "hp", n, MAX_SP))
 
     def _as_attacker(self, k, p, ctx):
         return {"species": self._species_cur(k), "level": 50,
@@ -339,7 +381,8 @@ class OpponentBelief:
                 p = rng.choices(self.particles[k], weights=self.weights[k])[0]
                 team.append({"species": sp, "moves": list(p["moves"]),
                              "item": p["item"], "ability": p["ability"],
-                             "nature": p["nature"]})
+                             "nature": p["nature"],
+                             **({"evs": list(p["evs"])} if p.get("evs") else {})})
             teams.append(team)
         return teams
 
@@ -350,7 +393,8 @@ def determinized(sets, cfg=CFG):
     summary()/top_particle() feed the tokenizer the sampled 'truth' through
     the same interface the real filter uses."""
     usage = {_sid(s["species"]): [(1, list(s["moves"]), s["item"],
-                                   s["ability"], s["nature"])] for s in sets}
+                                   s["ability"], s["nature"], s.get("evs"))]
+             for s in sets}
     return OpponentBelief([_sid(s["species"]) for s in sets], usage, cfg)
 
 
@@ -374,7 +418,7 @@ def _sid(name):
 # ---------------------------------------------------------------------------
 
 def _set_key(s):
-    # team sheets redact EVs, so identity is (moves, item, ability, nature)
+    # team sheets redact stat points, so identity is (moves, item, ability, nature)
     return (tuple(sorted(s["moves"])), s["item"], s["ability"], s["nature"])
 
 

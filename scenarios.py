@@ -47,20 +47,23 @@ def filler():
     return mon("Garchomp", ["protect"], ability="roughskin")
 
 
-ATK = [0, 252, 0, 0, 0, 252]
+# Champions stat points (max 32/stat, 66 total), not EVs
+ATK = [2, 32, 0, 0, 0, 32]
 
 SCENARIOS = [
     {
         "name": "metagross-kingambit",
-        "doc": "1v1 mixed-strategy equilibrium. Assert: both Metagross "
+        "doc": "1v1 mixed-strategy equilibrium. Metagross at 70% so Sucker "
+               "Punch's min roll (~74%) always KOs — at full HP it survives "
+               "and Hammer Arm just dominates. Assert: both Metagross "
                "options (Bullet Punch / Hammer Arm) >= 20% probability.",
         "p1": [mon("Metagross", ["bulletpunch", "hammerarm"],
                    item="metagrossite", ability="clearbody", nature="jolly",
                    evs=ATK), filler()],
         "p2": [mon("Kingambit", ["suckerpunch", "kowtowcleave"],
                    item="blackglasses", ability="defiant", nature="adamant",
-                   evs=[252, 252, 0, 0, 0, 0]), filler()],
-        "hp": {},
+                   evs=[32, 32, 0, 0, 2, 0]), filler()],
+        "hp": {("p1", 0): 0.70},
         "fainted": [("p1", 1), ("p2", 1)],
         "check": lambda info: [
             f"expected a mixed strategy, both options >= 20%, got "
@@ -79,7 +82,7 @@ SCENARIOS = [
                    ability="intimidate", nature="jolly", evs=ATK)],
         "p2": [mon("Kingambit", ["suckerpunch", "kowtowcleave"],
                    item="blackglasses", ability="defiant", nature="adamant",
-                   evs=[252, 252, 0, 0, 0, 0]), filler()],
+                   evs=[32, 32, 0, 0, 2, 0]), filler()],
         "hp": {("p2", 0): 0.30},
         "fainted": [("p2", 1)],
         "check": lambda info: (

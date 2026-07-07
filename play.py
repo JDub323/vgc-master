@@ -211,6 +211,9 @@ const bars=(rows,max)=>rows.map(r=>`<div class="row"><span class="lbl">${r.desc?
 <span class="bar"><i style="width:${(100*r.p/(max||1)).toFixed(1)}%"></i></span>
 <span class="pct">${(100*r.p).toFixed(0)}%</span></div>`).join("");
 const sprite=s=>`https://play.pokemonshowdown.com/sprites/gen5/${s}.png`;
+// unknown forme id -> retry the base species ('foo-forme' -> 'foo');
+// if that fails too (no dash left), hide instead of showing a broken icon
+const FALLBACK=`if(this.src.includes('-')){this.src=this.src.replace(/-[^./]*\\.png$/,'.png')}else{this.style.visibility='hidden'}`;
 async function tick(){
  try{
   const d=await (await fetch("state.json")).json();
@@ -223,9 +226,9 @@ async function tick(){
   S("pred").innerHTML=bars(d.opp_pred,Math.max(...d.opp_pred.map(r=>r.p),0.01));
   S("plan").innerHTML=bars(d.strategy,Math.max(...d.strategy.map(r=>r.p),0.01));
   S("field").innerHTML=d.field.map(side=>`<div class="row"><span class="lbl">${side.side}</span>`+
-   side.mons.map(m=>`<img title="${m.status}" src="${sprite(m.sprite)}" width="40" height="40" style="image-rendering:pixelated">`).join("")+`</div>`).join("");
+   side.mons.map(m=>`<img title="${m.status}" src="${sprite(m.sprite)}" onerror="${FALLBACK}" width="40" height="40" style="image-rendering:pixelated">`).join("")+`</div>`).join("");
   S("beliefs").innerHTML=d.beliefs.map(b=>`<div class="mon ${b.fainted?"dead":""}">
-   <img src="${sprite(b.sprite)}">
+   <img src="${sprite(b.sprite)}" onerror="${FALLBACK}">
    <div style="flex:1"><b>${b.species}</b>${b.status?`<span class="tag">${b.status}</span>`:""}
    <div class="hp"><i class="${b.hp<0.3?"low":""}" style="width:${(100*b.hp).toFixed(0)}%"></i></div>
    ${bars(b.items,1)}
@@ -274,6 +277,11 @@ def start_showdown(cfg):
         return None
     root = cfg.node_dir / "node_modules" / "pokemon-showdown"
     assert root.exists(), f"pokemon-showdown not installed under {root} (see README setup)"
+    # the git install ships no logs/ or config/chat-plugins/ trees; the
+    # server's repl cleanup and chat-plugin data writes crash on the missing
+    # dirs (release tarballs include them)
+    (root / "logs" / "repl").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "chat-plugins").mkdir(parents=True, exist_ok=True)
     log = open(cfg.artifacts_dir / "showdown-server.log", "w")
     proc = subprocess.Popen(
         [cfg.node_bin, "pokemon-showdown", "start", str(cfg.showdown_port),
@@ -359,7 +367,7 @@ def main(cfg=CFG):
     print("   (official client, local server — pick any username)")
     print(f"2. import your team (also saved to {cfg.artifacts_dir / 'my_team.txt'}):")
     print("   Teambuilder -> Import from text, format: " + cfg.format_id)
-    print(f"3. challenge  {username}  to that format")
+    print(f"3. challenge  {username}  to that format (chat: /user {username})")
     print(f"4. watch the bot think:  http://localhost:{cfg.dashboard_port}")
     print("=" * 72 + f"\n\n----- your team ({my_team}) -----\n{export}\n" + "-" * 33 + "\n")
 

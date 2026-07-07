@@ -23,6 +23,9 @@ const WEATHER = {sandstorm: 'Sand', raindance: 'Rain', sunnyday: 'Sun',
 const TERRAIN = {electricterrain: 'Electric', grassyterrain: 'Grassy',
   mistyterrain: 'Misty', psychicterrain: 'Psychic'};
 
+// q.evs are Champions Stat Points (0-32/stat, 66 total). The Champions flat
+// formula (base + SP + 20, HP base + SP + 75, nature after) is exactly the
+// standard L50/IV-31 formula with EVs = 8*SP, so the calc stays exact.
 function mon(q) {
   const item = q.item ? gen.items.get(q.item) : undefined;
   const abil = q.ability ? gen.abilities.get(q.ability) : undefined;
@@ -32,8 +35,8 @@ function mon(q) {
     item: item ? item.name : undefined,
     ability: abil ? abil.name : undefined,
     nature: nat ? nat.name : 'Serious',
-    evs: q.evs ? {hp: q.evs[0], atk: q.evs[1], def: q.evs[2],
-                  spa: q.evs[3], spd: q.evs[4], spe: q.evs[5]} : undefined,
+    evs: q.evs ? {hp: 8 * q.evs[0], atk: 8 * q.evs[1], def: 8 * q.evs[2],
+                  spa: 8 * q.evs[3], spd: 8 * q.evs[4], spe: 8 * q.evs[5]} : undefined,
     boosts: q.boosts || undefined,
     status: q.status || undefined,
   });
@@ -87,6 +90,10 @@ class DamageBridge:
         (min_frac, max_frac) of defender max HP, or None on calc failure.
         Duplicate requests (e.g. particles sharing item/nature) go over the
         wire once."""
+        # flush before collecting misses: flushing after would drop keys that
+        # were hits when scanned but gone by the final cache lookup
+        if len(self.cache) > 2_000_000:
+            self.cache.clear()
         keys = [json.dumps(r, sort_keys=True) for r in reqs]
         misses = {}   # key -> representative index
         for i, key in enumerate(keys):
@@ -94,8 +101,6 @@ class DamageBridge:
                 misses.setdefault(key, i)
         self.misses += len(misses)
         self.hits += len(keys) - len(misses)
-        if len(self.cache) > 2_000_000:
-            self.cache.clear()
         # write-then-read in small chunks: both stdio pipes are only a few KB
         # on Windows and node's piped stdout writes are synchronous there, so
         # flooding all requests before reading any responses deadlocks
@@ -106,7 +111,12 @@ class DamageBridge:
                 self.proc.stdin.write(json.dumps({**reqs[i], "id": i}) + "\n")
             self.proc.stdin.flush()
             for _ in chunk:
-                out = json.loads(self.proc.stdout.readline())
+                line = self.proc.stdout.readline()
+                if not line:
+                    raise RuntimeError(
+                        f"damage bridge exited (code {self.proc.poll()}) "
+                        f"mid-batch; last request: {reqs[chunk[0][1]]}")
+                out = json.loads(line)
                 val = None if "err" in out or not out["maxhp"] else (
                     out["min"] / out["maxhp"], out["max"] / out["maxhp"])
                 self.cache[keys[out["id"]]] = val
@@ -156,7 +166,7 @@ def damage_features(state, beliefs, bridge) -> dict:
                    "level": o["level"],
                    "item": None if o["item_consumed"] else (o["revealed_item"] or p["item"]),
                    "ability": o["revealed_ability"] or p["ability"],
-                   "nature": p["nature"],
+                   "nature": p["nature"], "evs": p.get("evs"),
                    "boosts": {k: v for k, v in o["boosts"].items()
                               if k in ("atk", "def", "spa", "spd", "spe") and v}}
             for j, mv in enumerate(s["moves"]):

@@ -31,47 +31,47 @@ TEAMS = {
 Pelipper @ Focus Sash
 Ability: Drizzle
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Hurricane
 - Weather Ball
 - Tailwind
 - Protect
 
-Archaludon @ Assault Vest
+Archaludon @ Leftovers
 Ability: Stamina
 Level: 50
-EVs: 252 HP / 252 SpA / 4 SpD
+EVs: 32 HP / 32 SpA / 2 SpD
 Modest Nature
 - Electro Shot
 - Draco Meteor
 - Flash Cannon
-- Body Press
+- Protect
 
 Swampert @ Swampertite
 Ability: Damp
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Liquidation
 - Earthquake
 - Ice Punch
 - Protect
 
-Basculegion (M) @ Choice Band
+Basculegion (M) @ Choice Scarf
 Ability: Adaptability
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Wave Crash
 - Last Respects
 - Aqua Jet
 - Flip Turn
 
-Sneasler @ Covert Cloak
+Sneasler @ White Herb
 Ability: Unburden
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Fake Out
 - Close Combat
@@ -81,10 +81,10 @@ Adamant Nature
 Incineroar @ Sitrus Berry
 Ability: Intimidate
 Level: 50
-EVs: 252 HP / 4 Atk / 252 SpD
+EVs: 32 HP / 2 Atk / 32 SpD
 Careful Nature
 - Fake Out
-- Knock Off
+- Throat Chop
 - Flare Blitz
 - Parting Shot
 """),
@@ -92,7 +92,7 @@ Careful Nature
 Tyranitar @ Smooth Rock
 Ability: Sand Stream
 Level: 50
-EVs: 252 HP / 252 Atk / 4 SpD
+EVs: 32 HP / 32 Atk / 2 SpD
 Adamant Nature
 - Rock Slide
 - Knock Off
@@ -102,7 +102,7 @@ Adamant Nature
 Excadrill @ Focus Sash
 Ability: Sand Rush
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - High Horsepower
 - Iron Head
@@ -112,17 +112,17 @@ Adamant Nature
 Gyarados @ Gyaradosite
 Ability: Intimidate
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Waterfall
 - Crunch
 - Taunt
 - Protect
 
-Hydreigon @ Choice Specs
+Hydreigon @ Choice Scarf
 Ability: Levitate
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Modest Nature
 - Draco Meteor
 - Dark Pulse
@@ -132,17 +132,17 @@ Modest Nature
 Sinistcha @ Kasib Berry
 Ability: Hospitality
 Level: 50
-EVs: 252 HP / 252 Def / 4 SpA
+EVs: 32 HP / 32 Def / 2 SpA
 Calm Nature
 - Matcha Gotcha
 - Rage Powder
 - Life Dew
 - Protect
 
-Rotom-Heat @ Safety Goggles
+Rotom-Heat @ Sitrus Berry
 Ability: Levitate
 Level: 50
-EVs: 252 HP / 252 SpA / 4 SpD
+EVs: 32 HP / 32 SpA / 2 SpD
 Modest Nature
 - Overheat
 - Thunderbolt
@@ -153,17 +153,17 @@ Modest Nature
 Charizard @ Charizardite Y
 Ability: Solar Power
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Heat Wave
 - Solar Beam
-- Tailwind
+- Weather Ball
 - Protect
 
 Aerodactyl @ Focus Sash
 Ability: Unnerve
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Rock Slide
 - Dual Wingbeat
@@ -173,7 +173,7 @@ Jolly Nature
 Farigiraf @ Sitrus Berry
 Ability: Armor Tail
 Level: 50
-EVs: 252 HP / 252 Def / 4 SpD
+EVs: 32 HP / 32 Def / 2 SpD
 Bold Nature
 - Trick Room
 - Foul Play
@@ -183,17 +183,17 @@ Bold Nature
 Garchomp @ Life Orb
 Ability: Rough Skin
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Earthquake
 - Stomping Tantrum
 - Dragon Claw
 - Protect
 
-Sylveon @ Choice Specs
+Sylveon @ Fairy Feather
 Ability: Pixilate
 Level: 50
-EVs: 252 HP / 252 SpA / 4 SpD
+EVs: 32 HP / 32 SpA / 2 SpD
 Modest Nature
 - Hyper Voice
 - Moonblast
@@ -203,7 +203,7 @@ Modest Nature
 Kingambit @ Black Glasses
 Ability: Defiant
 Level: 50
-EVs: 252 HP / 252 Atk / 4 SpD
+EVs: 32 HP / 32 Atk / 2 SpD
 Adamant Nature
 - Kowtow Cleave
 - Sucker Punch
@@ -214,7 +214,7 @@ Adamant Nature
 Floette-Eternal @ Floettite
 Ability: Flower Veil
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Moonblast
 - Dazzling Gleam
@@ -224,7 +224,7 @@ Timid Nature
 Garchomp @ Choice Scarf
 Ability: Rough Skin
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Earthquake
 - Dragon Claw
@@ -234,7 +234,7 @@ Jolly Nature
 Whimsicott @ Focus Sash
 Ability: Prankster
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Moonblast
 - Tailwind
@@ -244,7 +244,7 @@ Timid Nature
 Sneasler @ White Herb
 Ability: Unburden
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Fake Out
 - Coaching
@@ -254,17 +254,17 @@ Adamant Nature
 Incineroar @ Sitrus Berry
 Ability: Intimidate
 Level: 50
-EVs: 252 HP / 4 Atk / 252 SpD
+EVs: 32 HP / 2 Atk / 32 SpD
 Careful Nature
 - Fake Out
-- Knock Off
+- Throat Chop
 - Flare Blitz
 - Parting Shot
 
 Kingambit @ Black Glasses
 Ability: Defiant
 Level: 50
-EVs: 252 HP / 252 Atk / 4 SpD
+EVs: 32 HP / 32 Atk / 2 SpD
 Adamant Nature
 - Kowtow Cleave
 - Sucker Punch
@@ -275,7 +275,7 @@ Adamant Nature
 Delphox @ Delphoxite
 Ability: Blaze
 Level: 50
-EVs: 252 HP / 252 SpA / 4 SpD
+EVs: 32 HP / 32 SpA / 2 SpD
 Quiet Nature
 - Heat Wave
 - Psychic
@@ -285,7 +285,7 @@ Quiet Nature
 Floette-Eternal @ Leftovers
 Ability: Flower Veil
 Level: 50
-EVs: 252 HP / 252 SpA / 4 SpD
+EVs: 32 HP / 32 SpA / 2 SpD
 Modest Nature
 - Moonblast
 - Dazzling Gleam
@@ -295,7 +295,7 @@ Modest Nature
 Sinistcha @ Kasib Berry
 Ability: Hospitality
 Level: 50
-EVs: 252 HP / 252 Def / 4 SpA
+EVs: 32 HP / 32 Def / 2 SpA
 Sassy Nature
 - Matcha Gotcha
 - Rage Powder
@@ -305,7 +305,7 @@ Sassy Nature
 Kingambit @ Black Glasses
 Ability: Defiant
 Level: 50
-EVs: 252 HP / 252 Atk / 4 Def
+EVs: 32 HP / 32 Atk / 2 Def
 Brave Nature
 - Kowtow Cleave
 - Sucker Punch
@@ -315,20 +315,20 @@ Brave Nature
 Sneasler @ Focus Sash
 Ability: Unburden
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Fake Out
 - Close Combat
 - Gunk Shot
 - Protect
 
-Incineroar @ Safety Goggles
+Incineroar @ Sitrus Berry
 Ability: Intimidate
 Level: 50
-EVs: 252 HP / 4 Atk / 252 SpD
+EVs: 32 HP / 2 Atk / 32 SpD
 Careful Nature
 - Fake Out
-- Knock Off
+- Throat Chop
 - Flare Blitz
 - Parting Shot
 """),
@@ -336,7 +336,7 @@ Careful Nature
 Gholdengo @ Life Orb
 Ability: Good as Gold
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Make It Rain
 - Shadow Ball
@@ -346,17 +346,17 @@ Timid Nature
 Raichu @ Focus Sash
 Ability: Lightning Rod
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Fake Out
 - Thunderbolt
 - Electroweb
 - Protect
 
-Basculegion (M) @ Choice Band
+Basculegion (M) @ Choice Scarf
 Ability: Adaptability
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Wave Crash
 - Last Respects
@@ -366,17 +366,17 @@ Adamant Nature
 Whimsicott @ Mental Herb
 Ability: Prankster
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Moonblast
 - Tailwind
 - Encore
 - Taunt
 
-Garchomp @ Clear Amulet
+Garchomp @ Sitrus Berry
 Ability: Rough Skin
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Earthquake
 - Dragon Claw
@@ -386,7 +386,7 @@ Jolly Nature
 Floette-Eternal @ Floettite
 Ability: Flower Veil
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Moonblast
 - Dazzling Gleam
@@ -397,7 +397,7 @@ Timid Nature
 Ninetales-Alola @ Light Clay
 Ability: Snow Warning
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Aurora Veil
 - Blizzard
@@ -407,7 +407,7 @@ Timid Nature
 Gengar @ Gengarite
 Ability: Cursed Body
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Shadow Ball
 - Sludge Bomb
@@ -417,40 +417,40 @@ Timid Nature
 Snorlax @ Sitrus Berry
 Ability: Thick Fat
 Level: 50
-EVs: 252 HP / 252 Atk / 4 Def
+EVs: 32 HP / 32 Atk / 2 Def
 Brave Nature
 - Body Slam
 - High Horsepower
 - Yawn
 - Protect
 
-Dragonite @ Clear Amulet
+Dragonite @ Dragon Fang
 Ability: Multiscale
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Extreme Speed
 - Ice Spinner
 - Low Kick
 - Protect
 
-Scrafty @ Assault Vest
+Scrafty @ Leftovers
 Ability: Intimidate
 Level: 50
-EVs: 252 HP / 252 Atk / 4 SpD
+EVs: 32 HP / 32 Atk / 2 SpD
 Adamant Nature
 - Fake Out
 - Knock Off
 - Drain Punch
 - Ice Punch
 
-Incineroar @ Safety Goggles
+Incineroar @ Chople Berry
 Ability: Intimidate
 Level: 50
-EVs: 252 HP / 4 Atk / 252 SpD
+EVs: 32 HP / 2 Atk / 32 SpD
 Careful Nature
 - Fake Out
-- Knock Off
+- Throat Chop
 - Flare Blitz
 - Parting Shot
 """),
@@ -458,7 +458,7 @@ Careful Nature
 Venusaur @ Venusaurite
 Ability: Chlorophyll
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Modest Nature
 - Sludge Bomb
 - Giga Drain
@@ -468,27 +468,27 @@ Modest Nature
 Ninetales @ Heat Rock
 Ability: Drought
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Heat Wave
 - Solar Beam
 - Will-O-Wisp
 - Protect
 
-Typhlosion-Hisui @ Choice Specs
+Typhlosion-Hisui @ Choice Scarf
 Ability: Blaze
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Eruption
 - Shadow Ball
 - Heat Wave
 - Infernal Parade
 
-Dragonite @ Choice Band
+Dragonite @ Dragon Fang
 Ability: Multiscale
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Extreme Speed
 - Fire Punch
@@ -498,17 +498,17 @@ Adamant Nature
 Gardevoir @ Gardevoirite
 Ability: Trace
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Moonblast
 - Psychic
 - Hypnosis
 - Protect
 
-Arcanine-Hisui @ Clear Amulet
+Arcanine-Hisui @ Focus Sash
 Ability: Intimidate
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Rock Slide
 - Flare Blitz
@@ -519,17 +519,17 @@ Jolly Nature
 Scizor @ Scizorite
 Ability: Technician
 Level: 50
-EVs: 252 HP / 252 Atk / 4 SpD
+EVs: 32 HP / 32 Atk / 2 SpD
 Adamant Nature
 - Bullet Punch
 - U-turn
 - Swords Dance
 - Protect
 
-Sneasler @ Focus Sash
+Sneasler @ White Herb
 Ability: Unburden
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Fake Out
 - Close Combat
@@ -539,7 +539,7 @@ Adamant Nature
 Garchomp @ Life Orb
 Ability: Rough Skin
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Earthquake
 - Stomping Tantrum
@@ -549,17 +549,17 @@ Jolly Nature
 Sinistcha @ Kasib Berry
 Ability: Hospitality
 Level: 50
-EVs: 252 HP / 252 Def / 4 SpA
+EVs: 32 HP / 32 Def / 2 SpA
 Calm Nature
 - Matcha Gotcha
 - Rage Powder
 - Life Dew
 - Protect
 
-Aerodactyl @ Covert Cloak
+Aerodactyl @ Focus Sash
 Ability: Unnerve
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Rock Slide
 - Dual Wingbeat
@@ -569,7 +569,7 @@ Jolly Nature
 Milotic @ Leftovers
 Ability: Competitive
 Level: 50
-EVs: 252 HP / 4 SpA / 252 SpD
+EVs: 32 HP / 2 SpA / 32 SpD
 Calm Nature
 - Muddy Water
 - Ice Beam
@@ -580,7 +580,7 @@ Calm Nature
 Froslass @ Froslassite
 Ability: Cursed Body
 Level: 50
-EVs: 4 HP / 252 SpA / 252 Spe
+EVs: 2 HP / 32 SpA / 32 Spe
 Timid Nature
 - Shadow Ball
 - Icy Wind
@@ -590,7 +590,7 @@ Timid Nature
 Basculegion (M) @ Choice Scarf
 Ability: Adaptability
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Wave Crash
 - Last Respects
@@ -600,7 +600,7 @@ Adamant Nature
 Sneasler @ White Herb
 Ability: Unburden
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Adamant Nature
 - Fake Out
 - Coaching
@@ -610,7 +610,7 @@ Adamant Nature
 Kingambit @ Black Glasses
 Ability: Defiant
 Level: 50
-EVs: 252 HP / 252 Atk / 4 SpD
+EVs: 32 HP / 32 Atk / 2 SpD
 Adamant Nature
 - Kowtow Cleave
 - Sucker Punch
@@ -620,7 +620,7 @@ Adamant Nature
 Garchomp @ Focus Sash
 Ability: Rough Skin
 Level: 50
-EVs: 4 HP / 252 Atk / 252 Spe
+EVs: 2 HP / 32 Atk / 32 Spe
 Jolly Nature
 - Earthquake
 - Dragon Claw
@@ -630,7 +630,7 @@ Jolly Nature
 Floette-Eternal @ Leftovers
 Ability: Flower Veil
 Level: 50
-EVs: 252 HP / 252 SpA / 4 SpD
+EVs: 32 HP / 32 SpA / 2 SpD
 Modest Nature
 - Moonblast
 - Dazzling Gleam

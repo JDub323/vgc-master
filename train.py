@@ -19,7 +19,8 @@ from glob import glob
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import (BatchSampler, DataLoader, Dataset,
+                              RandomSampler, SequentialSampler)
 
 from config import CFG
 from models.policy_value import PolicyValueNet
@@ -42,12 +43,28 @@ class Shards(Dataset):
     def __len__(self):
         return len(self.tokens)
 
-    def __getitem__(self, i):
-        return (self.tokens[i].astype(np.int64), self.acts[i].astype(np.int64),
-                np.float32(self.value[i]), np.float32(self.weight[i]),
-                self.opp_items[i].astype(np.int64),
-                self.opp_abils[i].astype(np.int64),
-                self.opp_moves[i].astype(np.int64))
+    def __getitem__(self, idxs):
+        """idxs is a whole batch of indices (see make_loader): numpy fancy
+        indexing materializes each field once per batch instead of running
+        Python per sample — the loader was the bottleneck, not the GPU."""
+        return (torch.from_numpy(self.tokens[idxs].astype(np.int64)),
+                torch.from_numpy(self.acts[idxs].astype(np.int64)),
+                torch.from_numpy(self.value[idxs].astype(np.float32)),
+                torch.from_numpy(self.weight[idxs].astype(np.float32)),
+                torch.from_numpy(self.opp_items[idxs].astype(np.int64)),
+                torch.from_numpy(self.opp_abils[idxs].astype(np.int64)),
+                torch.from_numpy(self.opp_moves[idxs].astype(np.int64)))
+
+
+def make_loader(ds, batch_size, shuffle, device, cfg=CFG):
+    """Batched-index loading: the sampler yields index lists, __getitem__
+    returns ready tensors, automatic collation is off (batch_size=None)."""
+    base = RandomSampler(ds) if shuffle else SequentialSampler(ds)
+    return DataLoader(ds, batch_size=None,
+                      sampler=BatchSampler(base, batch_size, drop_last=False),
+                      num_workers=cfg.num_workers,
+                      pin_memory=device == "cuda",
+                      persistent_workers=cfg.num_workers > 0)
 
 
 def compute_loss(model, batch, cfg=CFG):
@@ -72,9 +89,10 @@ def compute_loss(model, batch, cfg=CFG):
     with torch.no_grad():
         joint_hit = ((slots[:, 0].argmax(-1) == acts[:, 0])
                      & (slots[:, 1].argmax(-1) == acts[:, 1])).float().mean()
-    return loss, {"loss": loss.item(), "policy": policy_loss.item(),
-                  "value": value_loss.item(), "aux": aux_loss.item(),
-                  "top1_joint": joint_hit.item()}
+    # stats stay 0-dim GPU tensors; .item() every step would sync the device
+    return loss, {"loss": loss.detach(), "policy": policy_loss.detach(),
+                  "value": value_loss.detach(), "aux": aux_loss.detach(),
+                  "top1_joint": joint_hit}
 
 
 def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
@@ -96,18 +114,20 @@ def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
         n += bs
         for k, v in stats.items():
             agg[k] = agg.get(k, 0.0) + v * bs
-    return {k: v / n for k, v in agg.items()}
+    return {k: float(v / n) for k, v in agg.items()}   # one sync per epoch
 
 
 def main(cfg=CFG):
     epochs = int(sys.argv[1]) if len(sys.argv) > 1 else cfg.epochs
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.set_float32_matmul_precision("high")     # TF32 outside autocast
     tok = PositionTokenizer.load(cfg)
     train_ds, val_ds = Shards("train", cfg), Shards("val", cfg)
     print(f"train {len(train_ds)} / val {len(val_ds)} transitions, device={device}")
-    train_dl = DataLoader(train_ds, cfg.batch_size, shuffle=True,
-                          num_workers=cfg.num_workers, pin_memory=device == "cuda")
-    val_dl = DataLoader(val_ds, cfg.batch_size, num_workers=cfg.num_workers)
+    train_dl = make_loader(train_ds, cfg.batch_size, True, device, cfg)
+    # same batch as training: a larger no-grad batch barely helps (val is 5%
+    # of the data) but its activation peak sets the GPU memory high-water mark
+    val_dl = make_loader(val_ds, cfg.batch_size, False, device, cfg)
 
     cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     last = cfg.checkpoint_dir / "ckpt_last.pt"
@@ -124,7 +144,8 @@ def main(cfg=CFG):
     print(f"model: {n_params / 1e6:.1f}M params")
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
-                            weight_decay=cfg.weight_decay)
+                            weight_decay=cfg.weight_decay,
+                            fused=device == "cuda")
     total_steps = max(1, len(train_dl) * epochs)
 
     def lr_lambda(step):

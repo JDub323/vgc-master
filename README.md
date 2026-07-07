@@ -20,7 +20,8 @@ Three cooperating pieces:
 2. **Belief tracker** ([beliefs.py](beliefs.py)) — a particle filter over opponent sets,
    no neural net. Priors come from train-split team sheets; reveals are hard
    constraints; speed-order and observed-damage evidence kill inconsistent
-   particles (with one-sided slack because team sheets redact stat training).
+   particles (with one-sided stat-point bounds because team sheets redact
+   stat training).
    Feeds summary tokens to the tokenizer and sampled sets to the search.
 3. **Search** ([search/mcts.py](search/mcts.py), [search/node.py](search/node.py)) — decoupled UCT with
    policy priors on a forkable Showdown sim ([env.py](env.py) sidecar), determinized
@@ -209,8 +210,11 @@ Support modules entered here:
   same-priority move order implies effective-speed inequalities (this is
   what concentrates mass on choice-scarf/fast variants); damage they deal to
   us is a tight likelihood (our defenses are known exactly); damage we deal
-  to them loosely constrains HP x defense. Sheets redact EVs, so constraints
-  get one-sided `investment_slack`. If evidence kills every particle the
+  to them loosely constrains HP x defense. Sheets redact stat points (the
+  Champions 66-point / 32-per-stat system), so constraints get exact
+  one-sided bounds derived from base stats at SP 0 vs the 32 cap
+  (`Config.investment_slack` is only the fallback when dex data is
+  missing). If evidence kills every particle the
   weights rebuild from the prior (counted — see `--audit` below). A filter
   was chosen over a learned belief net because every update rule is
   physics-checkable against the damage calculator, and its failure mode
@@ -240,7 +244,7 @@ and an auxiliary set-prediction loss (~0.2 weight) on the oracle sheets.
 bf16 autocast on CUDA, AdamW, cosine LR with warmup, grad clipping,
 resumable checkpoints (`ckpt_last.pt` / `ckpt_best.pt`), TensorBoard + a
 plain terminal table. [models/policy_value.py](models/policy_value.py) is a vanilla ~6-layer
-pre-norm transformer encoder (~17M params — deliberately small: it must run
+pre-norm transformer encoder (~5.5M params — deliberately small: it must run
 2x per node expansion *inside* the search). The aux head reads the six
 opponent-species token positions; it exists to shape representations toward
 hidden-set inference and to cross-check the particle filter, not to feed
@@ -300,11 +304,12 @@ The search itself lives in [search/](search/):
   (0 = argmax for evaluation).
 
 [scenarios.py](scenarios.py) is the acceptance test for all of that. The headline scenario
-is **Metagross vs Kingambit 1v1**: Bullet Punch outprioritizes and blanks
-Sucker Punch (target already moved), Hammer Arm OHKOs at 4x but eats Sucker
-Punch first, Kowtow Cleave punishes the Bullet Punch line — matching-pennies
-structure, so a correct simultaneous-move search **must** output a mixed
-strategy (assertion: both Metagross options ≥ 20%). A pure answer here is
+is **Metagross vs Kingambit 1v1** (Metagross at 70% so Sucker Punch's min
+roll KOs): Bullet Punch outprioritizes and blanks Sucker Punch (target
+already moved), Hammer Arm OHKOs at 4x but eats Sucker Punch first, Kowtow
+Cleave punishes the Bullet Punch line — matching-pennies structure, so a
+correct simultaneous-move search **must** output a mixed strategy
+(assertion: both Metagross options ≥ 20%). A pure answer here is
 the signature failure of sequential-move search. Two more authored endgames
 assert won positions are recognized (value ≥ threshold, top action attacks).
 The runner prints the actual damage matrix via the calc bridge so you can
@@ -434,9 +439,10 @@ The code is laptop-debuggable but sized for a big box; the knobs that matter:
 
 - Demonstrators saw open sheets; the model sees CTS reconstructions. Bias is
   accepted for v1 (a non-OTS fine-tune pass is the documented follow-up).
-- Team sheets redact EVs/stat training, so oracle sets and belief particles
-  use 0 EVs with one-sided investment slack (`Config.investment_slack`);
-  `beliefs.py --audit` measures what this costs.
+- Team sheets redact stat training, so oracle sets and belief particles use
+  0 stat points with exact one-sided SP-cap bounds (authored scenario sets
+  do carry their spreads through `determinized()`); `beliefs.py --audit`
+  measures what this costs.
 - Transitions where a slot's choice is unobservable (flinch/sleep/KO'd before
   acting — ~24%) are dropped rather than partially labeled.
 - Team preview (lead selection) is not modeled; bots bring the first four.

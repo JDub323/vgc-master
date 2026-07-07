@@ -121,7 +121,12 @@ function handle(q) {
         if (!p) return;
         Object.assign(p.boosts, ms.boosts || {});
         if (ms.status) p.setStatus(ms.status, null, null, true);
-        if (ms.item_off) p.clearItem();
+        if (ms.item_off && !p.clearItem()) {
+          // setItem/clearItem refuse benched mons (!isActive) — mutate directly
+          p.lastItem = p.item;
+          p.item = '';
+          p.itemState = b.initEffectState({id: '', target: p});
+        }
         if (p.isActive) {                    // Fake Out / First Impression legality
           p.activeTurns = ms.turns || 1;
           p.activeMoveActions = Math.max(0, (ms.turns || 1) - 1);
@@ -574,7 +579,15 @@ def make_live_player(sets, searcher, usage, cfg=CFG, on_decision=None,
             if g is None:
                 me = battle.player_role
                 opp = "p2" if me == "p1" else "p1"
-                opp_sets = [full_set({"species": p.species, "item": "",
+                # poke-env squashes forme ids ('typhlosionhisui'); rebuild the
+                # dashed form ('typhlosion-hisui') from base + remainder so
+                # sprite urls and display stay valid before the first |switch|
+                # line rewrites species_cur (sid() of both forms is identical,
+                # so nothing downstream changes)
+                def _dashed(p):
+                    s, b = p.species, p.base_species
+                    return f"{b}-{s[len(b):]}" if len(s) > len(b) else s
+                opp_sets = [full_set({"species": _dashed(p), "item": "",
                                       "ability": "", "moves": ()})
                             for p in battle.teampreview_opponent_team]
                 tracker = LogParser(battle.battle_tag, 0, "", cfg.format_id)

@@ -59,9 +59,11 @@ class Config:
     n_particles: int = 200
     resample_floor: float = 0.25           # resample when alive mass fraction drops below
     damage_tolerance: float = 0.03         # slack on observed damage fraction (replay HP is /100)
-    # OTS sheets redact EVs/stat training (verified: showteam EV fields are empty
-    # and sim damage at 0 EVs undershoots replay damage). Real stats sit between
-    # the 0-EV calc and ~max investment, so constraints get one-sided slack:
+    # OTS sheets redact stat training (verified: showteam SP fields are empty
+    # and sim damage at 0 SP undershoots replay damage). Real stats sit between
+    # 0 SP and the 32-SP cap; beliefs.py derives exact one-sided bounds from
+    # base stats + nature. This constant is only the fallback multiplier when
+    # the species/move is missing from dex.json:
     investment_slack: float = 1.35
 
     # ---- model ----
@@ -72,11 +74,11 @@ class Config:
     dropout: float = 0.1
 
     # ---- training ----
-    batch_size: int = 256
+    batch_size: int = 1024
     lr: float = 3e-4
     weight_decay: float = 0.01
     epochs: int = 8
-    warmup_steps: int = 1000
+    warmup_steps: int = 250
     grad_clip: float = 1.0
     value_loss_weight: float = 0.5
     aux_set_loss_weight: float = 0.2

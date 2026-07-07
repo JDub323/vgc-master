@@ -1,0 +1,44 @@
+# train model (control-c safe and resumes from ckpt_last.pt)
+python3 train.py
+
+# view richer curves from training runs
+tensorboard --logdir artifacts/checkpoints/tb
+
+# put the local Node install on PATH first (needed by anything that touches the sim or damage calc)
+export PATH=$PWD/artifacts/node-dist/bin:$PATH
+
+# train without losing the run if SSH drops; watch with: tail -f artifacts/train.log
+setsid nohup python3 train.py > artifacts/train.log 2>&1 &
+
+# predictor benchmarks on held-out battles (top-1/3/5, perplexity, ECE, pruned-set recall@k)
+python3 evaluate.py
+
+# decode the N positions the model gets most wrong (model debugging)
+python3 evaluate.py --worst 20
+
+# full data pipeline: download logs -> parse -> prep npz shards (prep is the slow step, hours)
+python3 data.py download && python3 data.py parse && python3 data.py prep
+
+# prove mid-battle state reconstruction on this box/sim pin — run before trusting search output
+python3 env.py --selftest
+
+# sidecar save/restore proof + steps/sec and forks/sec (sets the search budget)
+python3 env.py --benchmark
+
+# particle-filter breakdown rates on held-out games (depletion, oracle mass, bridge timing)
+python3 beliefs.py --audit 300
+
+# search correctness gates incl. the Metagross/Kingambit mixed-strategy test (works untrained)
+python3 scenarios.py
+
+# same but with the per-decision profiler, health counters and root tables
+python3 scenarios.py --debug
+
+# watch a search-vs-search game turn by turn (needs ckpt_best.pt; --step pauses each turn)
+python3 observe_game.py --step
+
+# replica teams through the sim's validator (run once per box; fix or --mine anything flagged)
+python3 teams.py --validate
+
+# play against the bot in the official Showdown client (spawns local server + dashboard)
+python3 play.py
