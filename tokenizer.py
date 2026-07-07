@@ -1,26 +1,39 @@
 """PositionTokenizer: CTS-observable state -> fixed-length token sequence.
 
 Fixed layout (one position always means the same thing, so learned positional
-embeddings carry the structure; encode() asserts the layout every call):
+embeddings carry the structure; encode() asserts the layout every call).
+Layout 2 (current, 561 tokens):
 
   [0]        CLS
   [1..4]     turn bucket, weather, terrain, trick room flag
   [5..9]     my side:  mega available, tailwind, reflect, light screen, aurora veil
   [10..14]   opp side: same five
-  [15..116]  my 6 mons x 17: slot, species, item, ability, hp, status,
-             4 moves, 7 boosts   (team-preview order — switch action k in
-             actions.py refers to the mon at block k)
-  [117..218] opp 6 mons x 17: same shape, revealed info only
-  [219..248] opp 6 mons x 5 belief tokens: modal item, P(that item) bucket,
-             speed-range low, speed-range high, bulk (the item token reuses the
-             item vocab, so this stays general — no item-specific features;
-             a choice scarf shows up as the modal item AND as a stretched
-             speed-range high end)
-  [249..536] damage matrix: my mon i x move j x opp mon k -> (min, max) roll
+  [15..122]  my 6 mons x 18: slot, species, item, ability, hp, status,
+             4 moves, 7 boosts, protect counter   (team-preview order —
+             switch action k in actions.py refers to the mon at block k)
+  [123..230] opp 6 mons x 18: same shape, revealed info only (the protect
+             counter is public: everyone sees Protect succeed)
+  [231..272] opp 6 mons x 7 belief tokens: modal item, P(that item) bucket,
+             speed-range low, speed-range high, bulk, modal spread archetype,
+             P(that archetype). Item- and archetype-general on purpose: a
+             choice scarf shows up as the modal item AND as a stretched
+             speed-range high end; a spread shows up as an archetype, never
+             as exact numbers.
+  [273..560] damage matrix: my mon i x move j x opp mon k -> (min, max) roll
              bucket pair. Two bounds fully describe the roll distribution:
              Showdown damage is a uniform pick from 16 evenly spaced
              multipliers in [0.85, 1.00], so "uniform over [lo, hi]" is exact
              up to integer rounding, no empirical check needed.
+
+  The protect-counter token (PROT_0/1/2+) is the "can protect again
+  risk-free" flag: protect-likes succeed with certainty at PROT_0, 1/3 at
+  PROT_1, <=1/9 at PROT_2 (verified against the pinned sim: the stall
+  counter triples per consecutive use; Wide/Quick Guard never fail from it
+  but DO increment it).
+
+Layout 1 (537 tokens, archived pre-phase-3 models) is the same without the
+protect and archetype tokens; vocab.json records which layout it was built
+with, and benchmark bundles reconstruct their own layout.
 
 Designed to be swapped out wholesale: everything downstream only calls
 encode() / vocab_size() / the aux-label index helpers.
@@ -28,10 +41,15 @@ encode() / vocab_size() / the aux-label index helpers.
 
 import json
 import re
+from pathlib import Path
 
 import numpy as np
 
 from config import CFG
+
+LAYOUT_VERSION = 2   # bump when the token layout changes; vocab.json carries it
+                     # so archived benchmark bundles rebuild the layout they
+                     # were trained on
 
 WEATHERS = ["", "sandstorm", "raindance", "sunnyday", "snowscape", "hail",
             "primordialsea", "desolateland", "deltastream"]
@@ -45,20 +63,24 @@ N_MONS = 6
 
 
 class PositionTokenizer:
-    def __init__(self, vocab: dict, lists: dict, cfg=CFG):
+    def __init__(self, vocab: dict, lists: dict, cfg=CFG, layout=LAYOUT_VERSION):
+        assert layout in (1, 2), layout
         self.vocab = vocab
         self.cfg = cfg
+        self.layout = layout
         self.move_list = lists["move"]
         self.item_list = lists["item"]
         self.ability_list = lists["ability"]
         self._move_map = {m: i + 1 for i, m in enumerate(self.move_list)}
         self._item_map = {m: i + 1 for i, m in enumerate(self.item_list)}
         self._abil_map = {m: i + 1 for i, m in enumerate(self.ability_list)}
+        self.mon_block = MON_BLOCK + (1 if layout >= 2 else 0)     # + protect
+        self.belief_block = BELIEF_BLOCK + (2 if layout >= 2 else 0)  # + arch
         self.my_base = 15
-        self.opp_base = self.my_base + N_MONS * MON_BLOCK              # 117
-        self.belief_base = self.opp_base + N_MONS * MON_BLOCK          # 219
-        self.dmg_base = self.belief_base + N_MONS * BELIEF_BLOCK       # 249
-        self.n_tokens = self.dmg_base + N_MONS * 4 * N_MONS * 2        # 537
+        self.opp_base = self.my_base + N_MONS * self.mon_block
+        self.belief_base = self.opp_base + N_MONS * self.mon_block
+        self.dmg_base = self.belief_base + N_MONS * self.belief_block
+        self.n_tokens = self.dmg_base + N_MONS * 4 * N_MONS * 2   # 561 (v1: 537)
 
     # -- construction --------------------------------------------------------
     @classmethod
@@ -80,18 +102,24 @@ class PositionTokenizer:
         toks += [f"PROB_{i}" for i in range(cfg.n_prob_buckets)]
         toks += [f"SPD_{i}" for i in range(cfg.n_speed_buckets)]
         toks += [f"BULK_{i}" for i in range(cfg.n_bulk_buckets)]
+        toks += [f"PROT_{i}" for i in range(3)]        # layout 2: 0 / 1 / 2+
+        from beliefs import ARCHETYPES                 # layout 2: spread belief
+        toks += [f"ARCH_{a}" for a in ARCHETYPES]
         for ns in ("species", "move", "item", "ability", "nature"):
             toks += [f"{ns}:{n}" for n in names[ns]]
         vocab = {t: i for i, t in enumerate(toks)}
         lists = {k: names[k] for k in ("move", "item", "ability")}
         (cfg.artifacts_dir / "vocab.json").write_text(
-            json.dumps({"vocab": vocab, "lists": lists}))
+            json.dumps({"vocab": vocab, "lists": lists,
+                        "layout": LAYOUT_VERSION}))
         return cls(vocab, lists, cfg)
 
     @classmethod
-    def load(cls, cfg=CFG):
-        d = json.loads((cfg.artifacts_dir / "vocab.json").read_text())
-        return cls(d["vocab"], d["lists"], cfg)
+    def load(cls, cfg=CFG, path=None):
+        """path: explicit vocab.json (benchmark bundles); default = current
+        artifacts. Files that predate the layout field are layout 1."""
+        d = json.loads(Path(path or cfg.artifacts_dir / "vocab.json").read_text())
+        return cls(d["vocab"], d["lists"], cfg, layout=d.get("layout", 1))
 
     def vocab_size(self):
         return len(self.vocab)
@@ -114,7 +142,7 @@ class PositionTokenizer:
         return self._abil_map.get(ab, 0)
 
     def opp_species_positions(self):
-        return [self.opp_base + k * MON_BLOCK + 1 for k in range(N_MONS)]
+        return [self.opp_base + k * self.mon_block + 1 for k in range(N_MONS)]
 
     # -- encoding -------------------------------------------------------------
     def _t(self, name):
@@ -137,6 +165,11 @@ class PositionTokenizer:
     def _boost_toks(self, m):
         return [f"BOOST_{m['boosts'][k]}" for k in
                 ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion")]
+
+    def _prot_tok(self, m):
+        """Consecutive-protect counter: PROT_0 = can protect risk-free.
+        .get: states parsed before phase 3 lack the field (treated as 0)."""
+        return f"PROT_{min(2, m.get('protect_ct', 0))}"
 
     def _dmg_toks(self, cell):
         """(min, max) roll fractions -> a token per bound. The low token says
@@ -175,8 +208,10 @@ class PositionTokenizer:
                     f"ability:{m['set']['ability']}", self._hp_tok(m),
                     f"ST_{m['status'] or 'none'}"]
             out += moves + ["NO_MOVE"] * (4 - len(moves)) + self._boost_toks(m)
+            if self.layout >= 2:
+                out.append(self._prot_tok(m))
         # scenario/endgame teams can be short; training teams are always 6
-        out += ["PAD"] * (MON_BLOCK * (N_MONS - len(state["my"]["team"])))
+        out += ["PAD"] * (self.mon_block * (N_MONS - len(state["my"]["team"])))
 
         for m in state["opp"]["team"]:
             if m["item_consumed"]:
@@ -191,18 +226,23 @@ class PositionTokenizer:
             out += [self._slot_tok(m), f"species:{sid_of(m['species_cur'])}", item,
                     abil, self._hp_tok(m), f"ST_{m['status'] or 'none'}"]
             out += moves + ["UNK_MOVE"] * (4 - len(moves)) + self._boost_toks(m)
-        out += ["PAD"] * (MON_BLOCK * (N_MONS - len(state["opp"]["team"])))
+            if self.layout >= 2:
+                out.append(self._prot_tok(m))
+        out += ["PAD"] * (self.mon_block * (N_MONS - len(state["opp"]["team"])))
 
         for k in range(N_MONS):
             b = belief_summary.get(k)
             if b is None:
-                out += ["UNK"] * BELIEF_BLOCK
+                out += ["UNK"] * self.belief_block
             else:
                 out += [f"item:{b['item']}" if b["item"] else "UNK_ITEM",
                         f"PROB_{min(cfg.n_prob_buckets - 1, int(b['p_item'] * cfg.n_prob_buckets))}",
                         f"SPD_{min(cfg.n_speed_buckets - 1, int(b['spe_lo'] / cfg.speed_bucket_width))}",
                         f"SPD_{min(cfg.n_speed_buckets - 1, int(b['spe_hi'] / cfg.speed_bucket_width))}",
                         f"BULK_{min(cfg.n_bulk_buckets - 1, int(b['bulk'] / cfg.bulk_bucket_width))}"]
+                if self.layout >= 2:
+                    out += [f"ARCH_{b.get('arch') or 'any'}",
+                            f"PROB_{min(cfg.n_prob_buckets - 1, int(b.get('p_arch', 0.0) * cfg.n_prob_buckets))}"]
 
         for i in range(N_MONS):
             for j in range(4):

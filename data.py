@@ -52,6 +52,15 @@ def base_species(species: str) -> str:
     return re.sub(r"-Mega(-[XY])?$", "", species)
 
 
+# moves whose SUCCESS starts/refreshes the sim's stall counter (announced as
+# |-singleturn|; verified against pinned pokemon-showdown e440c4a: the ten
+# protect-likes both check and add the counter, Wide/Quick Guard add it
+# without ever checking it, Mat Block checks without adding)
+STALL_ADDERS = {"protect", "detect", "endure", "kingsshield", "spikyshield",
+                "banefulbunker", "obstruct", "silktrap", "burningbulwark",
+                "maxguard", "wideguard", "quickguard"}
+
+
 class Mon:
     def __init__(self, team_idx, set_):
         self.team_idx = team_idx
@@ -66,6 +75,14 @@ class Mon:
         self.mega_done = False
         self.transformed = False
         self.turns_active = 0     # turn starts spent on the field (Fake Out legality)
+        # consecutive successful stall-adder uses (Protect family + Wide/Quick
+        # Guard). 0 = the next protect-like succeeds for sure; n>=1 = 1/3^n.
+        # Public info for both sides. Verified against the pinned sim:
+        # the stall counter triples per consecutive use, Wide/Quick Guard
+        # never fail from it but DO increment it, Mat Block checks it
+        # without incrementing.
+        self.protect_ct = 0
+        self.stall_refreshed = False   # a stall-adder succeeded this turn
         # what the opponent has seen
         self.revealed_moves = []
         self.revealed_item = None
@@ -77,7 +94,7 @@ class Mon:
                 "hp": self.hp, "status": self.status, "boosts": dict(self.boosts),
                 "fainted": self.fainted, "active_slot": self.active_slot,
                 "appeared": self.appeared, "mega_done": self.mega_done,
-                "turns_active": self.turns_active,
+                "turns_active": self.turns_active, "protect_ct": self.protect_ct,
                 "item_consumed": self.item_consumed, "set": self.set}
 
     def view_opp(self):
@@ -86,7 +103,7 @@ class Mon:
                 "hp": self.hp, "status": self.status, "boosts": dict(self.boosts),
                 "fainted": self.fainted, "active_slot": self.active_slot,
                 "appeared": self.appeared, "mega_done": self.mega_done,
-                "turns_active": self.turns_active,
+                "turns_active": self.turns_active, "protect_ct": self.protect_ct,
                 "revealed_moves": list(self.revealed_moves),
                 "revealed_item": self.revealed_item,
                 "item_consumed": self.item_consumed,
@@ -228,6 +245,13 @@ class LogParser:
             self.events = []
         self.turn_no = n
         self.in_turn = True
+        for p in ("p1", "p2"):
+            for m in self.sides[p].mons:
+                # stall volatile survives exactly one turn without a refresh:
+                # no successful protect-like last turn -> counter is gone
+                if not m.stall_refreshed:
+                    m.protect_ct = 0
+                m.stall_refreshed = False
         for p in ("p1", "p2"):   # slots holding a live mon must produce a choice
             for slot in (0, 1):
                 m = self.sides[p].active(slot)
@@ -301,6 +325,8 @@ class LogParser:
             prev = self.sides[side_id].active(slot)
             if prev is not None:
                 prev.active_slot = None
+                prev.protect_ct = 0          # volatiles clear on switch-out
+                prev.stall_refreshed = False
             voluntary = (cmd == "switch" and self.in_turn
                          and not self.moved[side_id][slot]
                          and not any(t.startswith("[from]") for t in tags)
@@ -361,6 +387,7 @@ class LogParser:
         elif cmd == "faint":
             _, _, mon = self._pos(parts[2])
             mon.hp, mon.fainted, mon.status = 0.0, True, ""
+            mon.protect_ct, mon.stall_refreshed = 0, False
         elif cmd in ("-damage", "-heal", "-sethp"):
             side_id, slot, mon = self._pos(parts[2])
             before = mon.hp
@@ -434,6 +461,13 @@ class LogParser:
                 kind, _, name = parts[3].partition(":")
                 if kind in ("move", "item", "ability"):
                     self._reveal(side_id, mon, kind, name.strip())
+        elif cmd == "-singleturn":
+            # announced on SUCCESS of protect-likes / Wide / Quick Guard —
+            # the only reliable public signal that the stall counter grew
+            side_id, _, mon = self._pos(parts[2])
+            if sid(parts[3].replace("move: ", "")) in STALL_ADDERS:
+                mon.protect_ct += 1
+                mon.stall_refreshed = True
         elif cmd == "-mega":
             side_id, slot, mon = self._pos(parts[2])
             self.sides[side_id].mega_used = True

@@ -107,6 +107,94 @@ SCENARIOS = [
             [f"value {info['value']:+.2f} < +0.5 in a winning race"]
             if info["value"] < 0.5 else []),
     },
+    {
+        # DIAGNOSTIC, not a gate: probes the suspected underswitching bias
+        # after search (evaluate.py --switches probes it in the prior).
+        "name": "peli-weather-war",
+        "doc": "Weather war, mid-game (needs a checkpoint; value-head mode). "
+               "My Pelipper + Archaludon vs Torkoal + Venusaur with SUN up "
+               "(Torkoal entered after Pelipper). Full-power sun Eruption "
+               "threatens both my mons; Wide Guard blanks it entirely, and "
+               "switching Pelipper out preserves a later Drizzle re-entry "
+               "that flips the weather back. Diagnostic: the defensive "
+               "lines (Wide Guard / switch Pelipper / Protect) should carry "
+               "real mass; ~zero mass here is the underswitching signature.",
+        "needs_model": True,
+        "diagnostic": True,
+        "weather": "sunnyday",
+        "p1": [mon("Pelipper", ["hurricane", "weatherball", "wideguard",
+                                "protect"],
+                   item="focussash", ability="drizzle", nature="modest",
+                   evs=[32, 0, 0, 32, 2, 0], gender="F"),
+               mon("Archaludon", ["electroshot", "dracometeor", "bodypress",
+                                  "protect"],
+                   item="assaultvest", ability="stamina", nature="modest",
+                   evs=[32, 0, 0, 32, 2, 0]),
+               mon("Barraskewda", ["liquidation", "closecombat", "protect"],
+                   item="focussash", ability="swiftswim", nature="adamant",
+                   evs=ATK, gender="F")],
+        "p2": [mon("Torkoal", ["eruption", "heatwave", "protect"],
+                   item="charcoal", ability="drought", nature="quiet",
+                   evs=[32, 0, 0, 32, 2, 0], gender="F"),
+               mon("Venusaur", ["sludgebomb", "gigadrain", "sleeppowder",
+                                "protect"],
+                   item="lifeorb", ability="chlorophyll", nature="modest",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F"),
+               mon("Flareon", ["flareblitz", "protect"], item="leftovers",
+                   ability="flashfire", nature="adamant", evs=ATK,
+                   gender="F")],
+        "hp": {("p1", 0): 0.75},
+        "fainted": [],
+        "check": lambda info: (lambda defensive: [
+            f"defensive lines carry only {defensive:.0%} "
+            "(wide guard + pelipper switch + pelipper protect) — "
+            "underswitching signature if this stays ~0 across checkpoints"
+        ] if defensive < 0.15 else [])(
+            _mass(info, "wideguard") + _slot_mass(info, 0, "sw ")
+            + _slot_mass(info, 0, "protect")),
+    },
+    {
+        # DIAGNOSTIC: the joint-context case the factorized head could not
+        # express — a frail attacker's best action depends on whether its
+        # partner redirects.
+        "name": "chomp-redirect",
+        "doc": "Joint-action context (needs a checkpoint). 25% Garchomp + "
+               "Amoonguss vs faster Dragapult that KOs Garchomp on any hit. "
+               "Attacking with Garchomp only makes sense alongside partner "
+               "Rage Powder; otherwise it should protect or switch. "
+               "Diagnostic: P(chomp attacks | Amoonguss rage powders) should "
+               "exceed P(chomp attacks | it doesn't) — a factorized policy "
+               "is structurally unable to show that gap.",
+        "needs_model": True,
+        "diagnostic": True,
+        "p1": [mon("Garchomp", ["dragonclaw", "rockslide", "protect"],
+                   item="lifeorb", ability="roughskin", nature="jolly",
+                   evs=ATK),
+               mon("Amoonguss", ["ragepowder", "sludgebomb", "protect"],
+                   item="sitrusberry", ability="regenerator", nature="sassy",
+                   evs=[32, 0, 17, 0, 17, 0], gender="F"),
+               mon("Gyarados", ["waterfall", "protect"], item="leftovers",
+                   ability="intimidate", nature="jolly", evs=ATK, gender="F")],
+        "p2": [mon("Dragapult", ["dragondarts", "phantomforce", "protect"],
+                   item="choiceband", ability="clearbody", nature="jolly",
+                   evs=ATK),
+               mon("Primarina", ["moonblast", "protect"], item="sitrusberry",
+                   ability="torrent", nature="modest",
+                   evs=[32, 0, 0, 32, 2, 0], gender="F"),
+               mon("Clefairy", ["followme", "protect"], item="eviolite",
+                   ability="friendguard", nature="sassy",
+                   evs=[32, 0, 17, 0, 17, 0], gender="F")],
+        "hp": {("p1", 0): 0.25},
+        "fainted": [],
+        "check": lambda info: (lambda with_rp, without_rp: [
+            f"P(chomp attacks & rage powder)={with_rp:.0%} <= "
+            f"P(chomp attacks & no rage powder)={without_rp:.0%} — the "
+            "attack is not conditioned on the redirect"
+        ] if with_rp <= without_rp else [])(
+            _joint_mass(info, 0, ("dragonclaw", "rockslide"), 1, ("ragepowder",)),
+            _joint_mass(info, 0, ("dragonclaw", "rockslide"), 1,
+                        ("sludgebomb", "protect", "sw "))),
+    },
 ]
 
 
@@ -119,9 +207,34 @@ def _move_marginals(info, moves):
     return out
 
 
-def build_tracker(p1_sets, p2_sets, hp, fainted, cfg):
+def _mass(info, sub):
+    """Total probability of joint actions whose description contains sub."""
+    return sum(p for desc, p in info["strategy"] if sub in desc)
+
+
+def _slot_mass(info, slot, prefix):
+    """Total probability where the given slot's action starts with prefix
+    (descriptions are 'slot_a_action, slot_b_action')."""
+    return sum(p for desc, p in info["strategy"]
+               if desc.split(", ")[slot].startswith(prefix))
+
+
+def _joint_mass(info, slot_a, prefixes_a, slot_b, prefixes_b):
+    """Probability that slot_a plays one of prefixes_a AND slot_b one of
+    prefixes_b — the joint-context marginal a factorized policy can't shape."""
+    total = 0.0
+    for desc, p in info["strategy"]:
+        parts = desc.split(", ")
+        if (any(parts[slot_a].startswith(x) for x in prefixes_a)
+                and any(parts[slot_b].startswith(x) for x in prefixes_b)):
+            total += p
+    return total
+
+
+def build_tracker(p1_sets, p2_sets, hp, fainted, cfg, weather=""):
     t = LogParser("scenario", 0, "", cfg.format_id)
     t.sides = {"p1": Side(p1_sets), "p2": Side(p2_sets)}
+    t.weather = weather
     for pid, k in fainted:
         m = t.sides[pid].mons[k]
         m.fainted, m.hp, m.appeared = True, 0.0, True
@@ -162,12 +275,17 @@ def print_damage_matrix(searcher, p1_sets, p2_sets):
 
 
 def run_scenarios(searcher, cfg):
-    failures = []
+    failures, ran = [], 0
     for scn in SCENARIOS:
         print(f"\n--- {scn['name']} ---\n{scn['doc']}")
+        if scn.get("needs_model") and searcher.model is None:
+            print("  SKIP (needs a trained checkpoint)")
+            continue
+        ran += 1
         print_damage_matrix(searcher, scn["p1"], scn["p2"])
         tracker = build_tracker(scn["p1"], scn["p2"], scn["hp"],
-                                scn.get("fainted", []), cfg)
+                                scn.get("fainted", []), cfg,
+                                weather=scn.get("weather", ""))
         belief = determinized(scn["p2"], cfg)
         joint, info = searcher.choose(tracker, belief, "p1", None,
                                       my_brought=list(range(len(scn["p1"]))),
@@ -177,13 +295,16 @@ def run_scenarios(searcher, cfg):
         for desc, p in info["strategy"][:6]:
             print(f"  {p:6.1%}  {desc}")
         errs = scn["check"](info)
+        # diagnostic scenarios inform (underswitching / joint-context bias);
+        # they never gate the suite
+        tag = "NOTE" if scn.get("diagnostic") else "FAIL"
         for e in errs:
-            print(f"  FAIL: {e}")
+            print(f"  {tag}: {e}")
         if not errs:
             print("  PASS")
-        failures += [(scn["name"], e) for e in errs]
-    print(f"\n{len(SCENARIOS) - len(set(n for n, _ in failures))}/"
-          f"{len(SCENARIOS)} scenarios passed")
+        if not scn.get("diagnostic"):
+            failures += [(scn["name"], e) for e in errs]
+    print(f"\n{ran - len(set(n for n, _ in failures))}/{ran} scenarios passed")
     return failures
 
 

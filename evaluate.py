@@ -7,9 +7,9 @@ the direct measure of whether pruning the search to the model's top-k is safe.
 Also: top-1/3/5 joint accuracy, perplexity (log-loss), and calibration (ECE),
 since the probabilities weight the search.
 
-Joint distributions come from the per-slot factorization (outer product),
-masked to game-legal combos (no double mega, no double switch to the same mon)
-and renormalized — the same recombination the search uses.
+The model emits joint distributions directly (predict_batch, either head
+architecture); the per-slot baselines are recombined by outer product, masked
+to game-legal combos and renormalized.
 
 CLI: python evaluate.py [checkpoint]
      --worst N    decode the N test positions the model gets most wrong
@@ -17,6 +17,10 @@ CLI: python evaluate.py [checkpoint]
                   fastest way to see WHERE the model should improve
      --aux        auxiliary-head accuracy vs the oracle team sheets, the
                   learned counterpart to `beliefs.py --audit`
+     --switches   switch-calibration report: does the model systematically
+                  underweight switching relative to the humans it cloned?
+                  (This measures the PRIOR; scenarios.py's diagnostic
+                  positions measure the same bias after search.)
 """
 
 import sys
@@ -24,31 +28,28 @@ import sys
 import numpy as np
 import torch
 
-from actions import N_SLOT_ACTIONS, from_index, joint_ok
+from actions import N_SLOT_ACTIONS, from_index, static_joint_mask
 from config import CFG
 from models.baselines import MaxDamagePolicy, RandomPolicy
 from models.policy_value import PolicyValueNet
-from tokenizer import MON_BLOCK, N_MONS, PositionTokenizer
+from tokenizer import N_MONS, PositionTokenizer
 from train import Shards
 
 KS = (1, 3, 5, CFG.top_k_actions, 16)
 TGT = {0: "", 1: ">1", 2: ">2", 3: ">ally"}
 
 
-def joint_mask():
-    m = np.ones((N_SLOT_ACTIONS, N_SLOT_ACTIONS), dtype=bool)
-    for a in range(N_SLOT_ACTIONS):
-        for b in range(N_SLOT_ACTIONS):
-            m[a, b] = joint_ok(from_index(a), from_index(b))
-    return m
-
-
-def score(slot_dists, acts, mask):
-    """slot_dists [B,2,A], acts [B,2] -> metrics dict."""
+def factorized_to_joint(slot_dists):
+    """Per-slot dists [B,2,A] (the baselines) -> flat joint [B, A*A],
+    statically masked and renormalized — the v1 recombination."""
     joint = slot_dists[:, 0, :, None] * slot_dists[:, 1, None, :]   # [B,A,A]
-    joint *= mask
+    joint *= static_joint_mask()
     joint /= joint.sum(axis=(1, 2), keepdims=True)
-    flat = joint.reshape(len(joint), -1)
+    return joint.reshape(len(joint), -1)
+
+
+def score(flat, acts):
+    """flat joint dists [B, A*A], acts [B,2] -> metrics dict."""
     label = acts[:, 0] * N_SLOT_ACTIONS + acts[:, 1]
     p_label = flat[np.arange(len(flat)), label]
     order = np.argsort(-flat, axis=1)
@@ -72,8 +73,8 @@ def score(slot_dists, acts, mask):
 # model debug: decode the positions the model gets most wrong
 # ---------------------------------------------------------------------------
 
-def _blocks(names, base):
-    return [names[base + k * MON_BLOCK: base + (k + 1) * MON_BLOCK]
+def _blocks(tok, names, base):
+    return [names[base + k * tok.mon_block: base + (k + 1) * tok.mon_block]
             for k in range(N_MONS)]
 
 
@@ -88,7 +89,7 @@ def describe_state(tok, ids) -> str:
              + "  my[" + " ".join(names[5:10]) + "]"
              + " opp[" + " ".join(names[10:15]) + "]"]
     for side, base in (("my ", tok.my_base), ("opp", tok.opp_base)):
-        for b in _blocks(names, base):
+        for b in _blocks(tok, names, base):
             if b[0] in ("PAD", "UNSEEN"):
                 continue
             moves = ",".join(_short(m) for m in b[6:10]
@@ -106,7 +107,7 @@ def describe_action(tok, ids, pair) -> str:
     """(slot_a_idx, slot_b_idx) -> readable, resolving move/species names
     from the token blocks."""
     names = tok.decode(ids)
-    blocks = _blocks(names, tok.my_base)
+    blocks = _blocks(tok, names, tok.my_base)
     out = []
     for slot, ai in enumerate(pair):
         a = from_index(int(ai))
@@ -133,6 +134,38 @@ def worst(flat, acts, ds, tok, n):
         for t in np.argsort(-flat[i])[:3]:
             print(f"  model {flat[i][t]:5.1%}: "
                   + describe_action(tok, ds.tokens[i], divmod(int(t), N_SLOT_ACTIONS)))
+
+
+def switch_report(net, acts, k=CFG.top_k_actions):
+    """Prior-level switch calibration. If the model's average switch mass
+    tracks the human switch rate AND recall@k on human-switch positions
+    matches non-switch positions, the prior is fine and any in-game
+    underswitching lives in the search (reconstruction gaps, determinization
+    paranoia). If these numbers are skewed, it is a data/architecture issue
+    and no amount of search tuning fixes it."""
+    sw = np.zeros(N_SLOT_ACTIONS * N_SLOT_ACTIONS, dtype=bool)
+    for a in range(N_SLOT_ACTIONS):
+        for b in range(N_SLOT_ACTIONS):
+            sw[a * N_SLOT_ACTIONS + b] = (from_index(a).kind == "switch"
+                                          or from_index(b).kind == "switch")
+    label = acts[:, 0] * N_SLOT_ACTIONS + acts[:, 1]
+    human_sw = sw[label]
+    p_sw = net[:, sw].sum(1)
+    order = np.argsort(-net, axis=1)
+    rank = np.argmax(order == label[:, None], axis=1)
+    print("\nswitch calibration (test split):")
+    print(f"  humans chose a switch:        {human_sw.mean():.1%} of positions")
+    print(f"  model mean P(any switch):     {p_sw.mean():.1%}"
+          f"   (ratio {p_sw.mean() / max(1e-9, human_sw.mean()):.2f} — "
+          "<1 = underweights switching)")
+    print(f"  mean P(switch) when human did:    {p_sw[human_sw].mean():.1%}")
+    print(f"  mean P(switch) when human didn't: {p_sw[~human_sw].mean():.1%}")
+    for name, m in (("human switched", human_sw), ("human stayed", ~human_sw)):
+        r = rank[m]
+        print(f"  {name:16s}: top-1 {(r == 0).mean():.1%}   "
+              f"recall@{k} {(r < k).mean():.1%}   ({m.sum()} positions)")
+    print("  (recall gap between the two rows = how often search pruning "
+          "throws away exactly the switches humans found)")
 
 
 def aux_report(model, ds, cfg):
@@ -173,7 +206,6 @@ def main(cfg=CFG):
     dmg_active = np.concatenate([np.load(f)["dmg_active"] for f in files])
     acts = ds.acts.astype(np.int64)
     print(f"test transitions: {len(ds)}")
-    mask = joint_mask()
 
     model = PolicyValueNet.load(ckpt, cfg, device)
     dists = []
@@ -181,9 +213,11 @@ def main(cfg=CFG):
         d, _, _ = model.predict_batch(ds.tokens[i:i + cfg.batch_size])
         dists.append(d)
     net = np.concatenate(dists).astype(np.float64)
-    rows = {"policy net": score(net, acts, mask),
-            "max damage": score(MaxDamagePolicy().predict_batch(dmg_active), acts, mask),
-            "random": score(RandomPolicy().predict_batch(dmg_active), acts, mask)}
+    rows = {"policy net": score(net, acts),
+            "max damage": score(factorized_to_joint(
+                MaxDamagePolicy().predict_batch(dmg_active)), acts),
+            "random": score(factorized_to_joint(
+                RandomPolicy().predict_batch(dmg_active)), acts)}
 
     cols = list(next(iter(rows.values())))
     print(f"\n{'':14s}" + "".join(f"{c:>11s}" for c in cols))
@@ -192,15 +226,15 @@ def main(cfg=CFG):
     print("\n(recall@k = pruned-set recall: human joint action inside model top-k; "
           "baseline perplexities use eps-smoothed one-hot/uniform dists)")
 
+    if "--switches" in sys.argv:
+        switch_report(net, acts)
     if "--worst" in sys.argv or "--aux" in sys.argv:
         tok = PositionTokenizer.load(cfg)
         if "--aux" in sys.argv:
             aux_report(model, ds, cfg)
         if "--worst" in sys.argv:
-            joint = net[:, 0, :, None] * net[:, 1, None, :] * mask
-            joint /= joint.sum(axis=(1, 2), keepdims=True)
             i = sys.argv.index("--worst")
-            worst(joint.reshape(len(joint), -1), acts, ds, tok,
+            worst(net, acts, ds, tok,
                   int(sys.argv[i + 1]) if len(sys.argv) > i + 1 else 20)
 
 

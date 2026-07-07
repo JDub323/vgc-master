@@ -34,8 +34,8 @@ from collections import Counter
 
 import numpy as np
 
-from actions import (T_ALLY, T_AUTO, T_FOE_A, T_FOE_B, legal_joint_actions,
-                     to_choice_string, to_index)
+from actions import (T_ALLY, T_AUTO, T_FOE_A, T_FOE_B, joint_index,
+                     legal_joint_actions, to_choice_string, to_index)
 from beliefs import determinized
 from config import CFG
 from damage import DamageBridge, damage_features
@@ -78,12 +78,13 @@ def joint_choice(request, joint, name_to_idx) -> str:
     return to_choice_string(joint, lambda k: pos_of_idx[k])
 
 
-def _joint_priors(slot_dist, joints, k):
-    """Factorized per-slot dist -> normalized priors over legal joints,
+def _joint_priors(joint_dist, joints, k):
+    """Model joint dist (flat [N_JOINT_ACTIONS], either head architecture —
+    see policy_value.predict_batch) -> normalized priors over legal joints,
     optionally pruned to the top-k (k=None in solve mode: exactness beats
     pruning when the branching is already small)."""
-    p = np.array([slot_dist[0][to_index(a)] * slot_dist[1][to_index(b)]
-                  for a, b in joints], dtype=np.float64)
+    p = np.array([joint_dist[joint_index(a, b)] for a, b in joints],
+                 dtype=np.float64)
     p = p / p.sum() if p.sum() > 0 else np.full(len(joints), 1.0 / len(joints))
     if k and len(joints) > k:
         keep = np.argsort(-p)[:k]
@@ -123,6 +124,7 @@ class DetGame:
             m.fainted, m.active_slot = rm.fainted, rm.active_slot
             m.appeared, m.mega_done = rm.appeared, rm.mega_done
             m.transformed, m.turns_active = rm.transformed, rm.turns_active
+            m.protect_ct = rm.protect_ct        # public: everyone saw it protect
             m.revealed_moves = list(rm.revealed_moves)
             m.revealed_item, m.item_consumed = rm.revealed_item, rm.item_consumed
             m.revealed_ability = rm.revealed_ability
@@ -154,19 +156,30 @@ class Searcher:
     def __init__(self, model, tok, cfg=CFG, seed=0, debug=False):
         self.model, self.tok, self.cfg = model, tok, cfg
         self.rng = random.Random(seed)
+        self.np_rng = np.random.default_rng(seed)
         self.sc = Sidecar(cfg)
         self.bridge = DamageBridge(cfg) if cfg.use_damage_features else None
         self.dbg = SearchDebug(debug)
         self.health = Counter()
 
+    def close(self):
+        """Shut down this searcher's node processes (benchmark/self-play
+        workers spawn many searchers; long-lived scripts should not leak)."""
+        self.sc.close()
+        if self.bridge:
+            self.bridge.close()
+
     # -- one move decision ---------------------------------------------------
     def choose(self, tracker, belief, my_id, my_request, my_brought,
-               opp_brought=None, temperature=None, policy_only=False):
+               opp_brought=None, temperature=None, policy_only=False,
+               root_noise=None):
         """Returns (joint SlotAction pair sampled from the root mixed
         strategy, info dict with the full strategy / value / opponent
         prediction for display). policy_only=True skips the simulations and
         plays straight from the net's root priors — the no-search bot for
-        the Elo gap and for fast human games."""
+        the Elo gap and for fast human games. root_noise=(eps, alpha) mixes
+        Dirichlet noise into OUR root priors (self-play exploration, the
+        AlphaZero recipe) — never set during evaluation or live play."""
         cfg = self.cfg
         t_start = time.perf_counter()
         self.health = Counter()
@@ -189,6 +202,11 @@ class Searcher:
                             my_brought, opp_brought, solve)
                     for sample in belief.sample_sets(
                         1 if policy_only else cfg.n_determinizations, self.rng)]
+        if root_noise and not policy_only:
+            eps, alpha = root_noise
+            for det in dets:
+                noise = self.np_rng.dirichlet([alpha] * len(det.root.my_p))
+                det.root.my_p = (1 - eps) * det.root.my_p + eps * noise
         if not policy_only:
             budget = max(1, cfg.sims_per_move // len(dets))
             for det in dets:
@@ -229,6 +247,10 @@ class Searcher:
         info = {
             "value": value,
             "solve": solve,
+            # machine-readable mixed strategy over flat joint indices —
+            # the self-play policy target (visit counts, unnormalized)
+            "visits": [(joint_index(s[0][0], s[0][1]), float(s[1]))
+                       for s in strat],
             "strategy": [(self._describe(tracker, my_id, s[0]), float(p))
                          for s, p in zip(strat, probs)],
             "q": [(self._describe(tracker, my_id, s[0]),

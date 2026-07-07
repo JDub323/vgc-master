@@ -15,13 +15,22 @@ reveals only.
 Outputs: summary() buckets for the tokenizer, sample_sets(k) for search
 determinization, top_particle(k) for the damage feature matrix.
 
+Stat-point spreads: team sheets redact stat training, so each train-split set
+is expanded into low-dimensional SPREAD ARCHETYPES (fast / bulky-physical /
+bulky-special / bulky-attacker / max-offense / mixed — concrete allocations of
+the Champions 66-point system) plus one "any" catch-all that keeps the old
+one-sided bounds. Particles with a concrete spread make speed and damage
+evidence EXACT (the calc runs at that particle's real stats), so move order
+and observed damage discriminate archetypes: a surprisingly fast Kingambit
+kills the bulky variants, an underwhelming hit kills the offensive ones. The
+posterior over archetypes feeds the tokenizer as two belief tokens. General on
+purpose: archetypes, never exact spreads.
+
 Known blind spot: particles only cover sets seen in the train split, so a
-genuinely novel set (off-meta mon, custom spread) can kill every particle and
-force the prior fallback. `python beliefs.py --audit` measures how often that
-happens on held-out battles (depletion rate, whether the oracle set was even
-in the prior, and how much posterior mass it ends with). If the audit shows
-frequent depletion the fix is widening the prior — e.g. per-species SP-spread
-variants inferred from damage-roll residuals — not patching the filter.
+genuinely novel set (off-meta mon) can kill every particle and force the
+prior fallback. `python beliefs.py --audit` measures how often that happens
+on held-out battles (depletion rate, whether the oracle set was even in the
+prior, and how much posterior mass it ends with).
 """
 
 import json
@@ -56,6 +65,64 @@ def load_dex(cfg=CFG):
 
 
 MAX_SP = 32   # Champions stat-point cap per stat (66 total, IVs forced to 31)
+TOTAL_SP = 66
+
+# Spread archetypes: named allocations of the 66 stat points ("att" resolves
+# to atk or spa per set — nature intent first, then base stats). "any" is the
+# catch-all particle with no concrete spread; it keeps the conservative
+# one-sided bounds, so the filter can never do worse than the pre-archetype
+# version on an off-archetype custom spread.
+ARCHETYPES = {
+    "fast-strong":  {"spe": 32, "att": 32, "hp": 2},
+    "fast-bulky":   {"spe": 32, "hp": 32, "att": 2},
+    "strong-bulky": {"att": 32, "hp": 32, "spe": 2},
+    "bulky-phys":   {"hp": 32, "def": 32, "spd": 2},
+    "bulky-spec":   {"hp": 32, "spd": 32, "def": 2},
+    "mixed":        {"hp": 22, "att": 22, "spe": 22},
+    "any":          None,
+}
+
+
+def _att_key(species, nature, dex):
+    """Which attack stat this set invests: the nature's intent if it has one,
+    else the higher base stat."""
+    up, down = NATURES.get(nature, ("", ""))
+    if up in ("atk", "spa"):
+        return up
+    if down in ("atk", "spa"):                # dumped stat -> the other one
+        return "spa" if down == "atk" else "atk"
+    if dex and species in dex.get("species", {}):
+        bs = dex["species"][species]["baseStats"]
+        return "atk" if bs["atk"] >= bs["spa"] else "spa"
+    return "atk"
+
+
+def archetype_spread(arch, species, nature, dex):
+    """Archetype name -> concrete [hp, atk, def, spa, spd, spe] SP list."""
+    alloc = ARCHETYPES[arch]
+    if alloc is None:
+        return None
+    att = _att_key(species, nature, dex)
+    evs = [0] * 6
+    for stat, sp in alloc.items():
+        evs[STAT_KEYS.index(att if stat == "att" else stat)] = sp
+    return evs
+
+
+def _arch_prior_mult(arch, nature):
+    """Nature is public on no one's sheet either, but the particle carries it;
+    a Timid set is far likelier to run speed points than a Relaxed one."""
+    up, down = NATURES.get(nature, ("", ""))
+    m = 1.0
+    if up == "spe":
+        m *= 2.5 if arch.startswith("fast") else 0.5
+    if down == "spe":
+        m *= 0.2 if arch.startswith("fast") else 1.5
+    if up in ("def", "spd") and arch.startswith("bulky"):
+        m *= 2.0
+    if up in ("atk", "spa") and "strong" in arch:
+        m *= 1.5
+    return m
 
 
 def calc_stat(base, stat, nature, sp=0):
@@ -86,12 +153,15 @@ class OpponentBelief:
             # usage rows may carry a 6th element: a known SP spread (authored
             # scenarios / determinized own team); real sheets redact it
             sets = [{"moves": tuple(mv), "item": it, "ability": ab, "nature": na,
-                     "evs": rest[0] if rest else None, "n": c}
+                     "evs": rest[0] if rest else None, "arch": None, "n": c}
                     for c, mv, it, ab, na, *rest in usage.get(sp, [])]
             if not sets:
                 sets = [{"moves": (), "item": "", "ability": "", "nature": "serious",
-                     "evs": None, "n": 1}]
-            sets = sets[:cfg.n_particles]
+                     "evs": None, "arch": None, "n": 1}]
+            if getattr(cfg, "spread_archetypes", True):
+                sets = self._expand_archetypes(sp, sets, cfg)
+            else:
+                sets = sets[:cfg.n_particles]
             total = sum(s["n"] for s in sets)
             self.particles.append(sets)
             self.priors.append([s["n"] / total for s in sets])
@@ -105,16 +175,37 @@ class OpponentBelief:
         self.soft_depletions = [0] * len(opp_species)
         self.hard_depletions = [0] * len(opp_species)
 
+    def _expand_archetypes(self, sp, sets, cfg):
+        """Each redacted-spread set -> one particle per archetype, nature-
+        weighted. Sets that already carry a concrete spread (authored
+        scenarios, determinized teams) pass through untouched. The base-set
+        cap keeps the total particle count (and so the damage-bridge cost)
+        at ~n_particles, same as before the expansion."""
+        out = []
+        for s in sets[:max(1, cfg.n_particles // len(ARCHETYPES))]:
+            if s["evs"] is not None:
+                out.append(s)
+                continue
+            for arch in ARCHETYPES:
+                out.append({**s, "arch": arch,
+                            "evs": archetype_spread(arch, sp, s["nature"], self.dex),
+                            "n": s["n"] * _arch_prior_mult(arch, s["nature"])})
+        return out
+
     # -- stats -----------------------------------------------------------
     def _base(self, species, stat):
         if not self.dex or species not in self.dex["species"]:
             return None
         return self.dex["species"][species]["baseStats"][stat]
 
-    def _particle_speed(self, k, p, ctx=None, sp=0):
+    def _particle_speed(self, k, p, ctx=None, sp=None):
+        """sp=None: the particle's own spread if it has one, else 0 (the
+        conservative floor for 'any'-spread particles)."""
         base = self._base(self.species[k], "spe")
         if base is None:
             return None
+        if sp is None:
+            sp = p["evs"][5] if p.get("evs") else 0
         spe = calc_stat(base, "spe", p["nature"], sp)
         if p["item"] == "choicescarf" and not self.constraints[k]["consumed"]:
             spe = int(spe * 1.5)
@@ -219,18 +310,20 @@ class OpponentBelief:
                 if glob["tr"]:
                     first = not first    # trick room: slower acts first
                 k = o_idx
-                # stat training is hidden on both sides, so the inequality is
-                # one-sided: whichever side must be faster is evaluated at the
-                # SP cap (exact bound, replaces the old multiplicative slack)
+                # our own SP may be hidden too (prep replays: both sheets
+                # redact it), so OUR side of the inequality stays one-sided.
+                # Their side is exact for archetype particles (concrete
+                # spread) and one-sided only for the 'any' catch-all.
                 mine_hi = self._my_speed(m_idx, m_ctx, sp=MAX_SP)
 
                 def ok(p, mine=mine, mine_hi=mine_hi, first=first, k=k, ctx=o_ctx):
                     theirs = self._particle_speed(k, p, ctx)
                     if theirs is None:
                         return True
-                    if first:
-                        theirs_hi = self._particle_speed(k, p, ctx, sp=MAX_SP)
-                        return theirs_hi >= mine
+                    if first:                  # they acted before my mon
+                        if not p.get("evs"):
+                            theirs = self._particle_speed(k, p, ctx, sp=MAX_SP)
+                        return theirs >= mine
                     return mine_hi >= theirs
 
                 self._apply(k, ok)
@@ -294,7 +387,10 @@ class OpponentBelief:
     def _atk_slack(self, k, p, move):
         """Largest multiplier hidden attack SP (0..MAX_SP, redacted on team
         sheets) can put on this particle's damage: the calc ran at SP 0, and
-        damage is linear in the attack stat modulo rounding."""
+        damage is linear in the attack stat modulo rounding. Archetype
+        particles carry a concrete spread, so the calc is exact: no slack."""
+        if p.get("evs"):
+            return 1.0
         cat = (self.dex or {}).get("moves", {}).get(move, {}).get("category")
         key = "atk" if cat == "Physical" else "spa"
         base = self._base(self._species_cur(k), key)
@@ -304,7 +400,10 @@ class OpponentBelief:
 
     def _bulk_slack(self, k, p, move):
         """Smallest factor hidden bulk SP can shrink the observed damage
-        fraction to: frac = dmg/maxhp scales as 1/(defense * HP)."""
+        fraction to: frac = dmg/maxhp scales as 1/(defense * HP). Exact for
+        archetype particles: no slack."""
+        if p.get("evs"):
+            return 1.0
         cat = (self.dex or {}).get("moves", {}).get(move, {}).get("category")
         key = "def" if cat == "Physical" else "spd"
         sid = self._species_cur(k)
@@ -319,12 +418,14 @@ class OpponentBelief:
         return {"species": self._species_cur(k), "level": 50,
                 "item": None if self.constraints[k]["consumed"] else p["item"],
                 "ability": p["ability"], "nature": p["nature"],
+                "evs": p.get("evs"),
                 "boosts": ctx["atk_boosts"], "status": "brn" if ctx["burn"] else ""}
 
     def _as_defender(self, k, p, ctx):
         return {"species": self._species_cur(k), "level": 50,
                 "item": None if self.constraints[k]["consumed"] else p["item"],
                 "ability": p["ability"], "nature": p["nature"],
+                "evs": p.get("evs"),
                 "boosts": ctx["def_boosts"]}
 
     def _species_cur(self, k):
@@ -357,13 +458,25 @@ class OpponentBelief:
             hp_b, d_b, sd_b = (self._base(sp, s) for s in ("hp", "def", "spd"))
             if hp_b is not None:
                 for p, w in zip(ps, ws):
-                    hp = calc_stat(hp_b, "hp", p["nature"])
-                    df = calc_stat(d_b, "def", p["nature"])
-                    sd = calc_stat(sd_b, "spd", p["nature"])
+                    evs = p.get("evs") or [0] * 6
+                    hp = calc_stat(hp_b, "hp", p["nature"], evs[0])
+                    df = calc_stat(d_b, "def", p["nature"], evs[2])
+                    sd = calc_stat(sd_b, "spd", p["nature"], evs[4])
                     bulk += w * hp * (df + sd) / 2
+            arch, p_arch = self.arch_posterior(k)[0]
             out[k] = {"item": item, "p_item": p_item,
-                      "spe_lo": lo, "spe_hi": hi, "bulk": bulk}
+                      "spe_lo": lo, "spe_hi": hi, "bulk": bulk,
+                      "arch": arch, "p_arch": p_arch}
         return out
+
+    def arch_posterior(self, k):
+        """[(archetype, prob)] sorted by prob. Particles with an authored /
+        sampled concrete spread count under 'any' (their spread is known, an
+        archetype label adds nothing)."""
+        acc = {}
+        for w, p in zip(self.weights[k], self.particles[k]):
+            acc[p.get("arch") or "any"] = acc.get(p.get("arch") or "any", 0.0) + w
+        return sorted(acc.items(), key=lambda kv: -kv[1])
 
     def item_posterior(self, k):
         """[(item, prob)] sorted by prob, for summary() and the game viewer."""
@@ -463,12 +576,18 @@ def audit(max_battles, cfg=CFG):
                 bel.update(turn["events"], viewer=p)
             for k, s in enumerate(oracle):
                 mons += 1
-                keys = [_set_key(pt) for pt in bel.particles[k]]
-                i = keys.index(_set_key(s)) if _set_key(s) in keys else None
-                in_prior += i is not None
-                if i is not None:
-                    oracle_mass += bel.weights[k][i]
-                    top1 += bel.weights[k][i] == max(bel.weights[k])
+                # archetype expansion: several particles share one set
+                # identity, so grade the set's TOTAL mass across its variants
+                mass_by_key = {}
+                for pt, w in zip(bel.particles[k], bel.weights[k]):
+                    key = _set_key(pt)
+                    mass_by_key[key] = mass_by_key.get(key, 0.0) + w
+                ok = _set_key(s) in mass_by_key
+                in_prior += ok
+                if ok:
+                    m = mass_by_key[_set_key(s)]
+                    oracle_mass += m
+                    top1 += m == max(mass_by_key.values())
                 if bel.soft_depletions[k]:
                     soft += 1
                     by_species[bel.species[k]] += 1

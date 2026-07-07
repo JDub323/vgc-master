@@ -57,6 +57,9 @@ class Config:
 
     # ---- beliefs ----
     n_particles: int = 200
+    # expand each train-split set into SP-spread archetype particles
+    # (beliefs.ARCHETYPES); off = pre-phase-3 behavior (one-sided bounds only)
+    spread_archetypes: bool = True
     resample_floor: float = 0.25           # resample when alive mass fraction drops below
     damage_tolerance: float = 0.03         # slack on observed damage fraction (replay HP is /100)
     # OTS sheets redact stat training (verified: showteam SP fields are empty
@@ -83,6 +86,10 @@ class Config:
     value_loss_weight: float = 0.5
     aux_set_loss_weight: float = 0.2
     num_workers: int = 2
+    # torch.compile the training forward/backward (CUDA only; needs triton,
+    # so Linux big box yes, Windows laptop no). Checkpoints stay eager-keyed
+    # either way (models/policy_value.clean_state_dict).
+    compile_model: bool = True
 
     # ---- search (phase 2) ----
     top_k_actions: int = 6                 # per-player pruning width; also eval recall@k
@@ -91,6 +98,25 @@ class Config:
     play_temperature: float = 1.0
     solve_endgame_at: int = 2              # solve to terminal when <=N mons per side
     c_puct: float = 1.5                    # exploration constant in decoupled PUCT
+
+    # ---- self-play (phase 3) ----
+    # Sized so one overnight big-box run (~8-12h) completes tens of
+    # generate->train iterations. Throughput scales with procs x workers
+    # (each worker owns 3 node processes); re-run env.py --benchmark on the
+    # target box and adjust sp_sims / sp_workers to taste.
+    sp_procs: int = 2                      # generator subprocesses (beat the GIL)
+    sp_workers: int = 8                    # game threads per generator process
+    sp_games_per_iter: int = 400
+    sp_sims: int = 160                     # search budget while generating
+    sp_buffer_iters: int = 5               # train on the last N iterations
+    sp_epochs_per_iter: int = 2
+    sp_lr: float = 1e-4                    # fine-tune LR (BC used 3e-4 fresh)
+    sp_temp_turns: int = 8                 # tau=1 for the first N turns...
+    sp_final_temp: float = 0.25            # ...then this (0 = argmax)
+    sp_dirichlet_eps: float = 0.25         # AlphaZero root-noise mix-in
+    sp_dirichlet_alpha: float = 0.35       # ~10 / typical root width (~30)
+    sp_policy_targets_k: int = 32          # sparse policy target width
+    sp_gate_games: int = 20                # quick new-vs-old gate per iteration
 
     # ---- human-vs-bot play ----
     showdown_port: int = 8000              # local pokemon-showdown server

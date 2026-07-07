@@ -95,9 +95,9 @@ function handle(q) {
   if (q.op === 'reconstruct') {
     // Rebuild a mid-battle public state from scratch: fresh battle, leads
     // brought in via a real team-preview choice (Python pre-orders each team
-    // actives-first), then direct engine mutations for everything visible.
-    // Volatiles (choice lock, protect counter, encore, subs) are NOT rebuilt —
-    // documented v1 approximation.
+    // actives-first), then direct engine mutations for everything visible,
+    // incl. the consecutive-protect stall counter. Other volatiles (choice
+    // lock, encore, subs) are NOT rebuilt — documented approximation.
     const fmt = resolveFormat(q.format);
     const b = new Battle({formatid: fmt.id,
                           p1: {name: 'p1', team: q.p1team},
@@ -130,6 +130,16 @@ function handle(q) {
         if (p.isActive) {                    // Fake Out / First Impression legality
           p.activeTurns = ms.turns || 1;
           p.activeMoveActions = Math.max(0, (ms.turns || 1) - 1);
+        }
+        if (p.isActive && ms.stall) {
+          // consecutive-protect state: counter 3^n = the denominator of the
+          // next protect-like's success chance; duration 1 = expires after
+          // this turn unless refreshed, matching a live battle at turn start
+          p.addVolatile('stall');
+          if (p.volatiles['stall']) {
+            p.volatiles['stall'].counter = Math.pow(3, ms.stall);
+            p.volatiles['stall'].duration = 1;
+          }
         }
         if (ms.fainted) p.faint();
         else if (ms.hp < 1) p.sethp(Math.round(ms.hp * p.maxhp));
@@ -301,8 +311,8 @@ def reconstruct(sidecar, format_id, tracker, teams, brought):
 
     Rebuilt exactly: species/formes, HP%, status, boosts, fainted, consumed
     items, used megas, side conditions, weather/terrain/trick room, turns on
-    the field. NOT rebuilt (v1): choice lock, Protect streaks, encore/taunt/
-    sub volatiles, PP spent, exact residual durations.
+    the field, consecutive-protect (stall) counters. NOT rebuilt: choice
+    lock, encore/taunt/sub volatiles, PP spent, exact residual durations.
     """
     q = {"op": "reconstruct", "format": format_id, "sides": {},
          "field": {"weather": tracker.weather, "terrain": tracker.terrain,
@@ -331,7 +341,8 @@ def reconstruct(sidecar, format_id, tracker, teams, brought):
             "mons": [{"hp": ms[k].hp, "status": ms[k].status,
                       "fainted": ms[k].fainted, "boosts": ms[k].boosts,
                       "item_off": ms[k].item_consumed, "mega": ms[k].mega_done,
-                      "turns": ms[k].turns_active} for k in order]}
+                      "turns": ms[k].turns_active,
+                      "stall": getattr(ms[k], "protect_ct", 0)} for k in order]}
         q[f"{side_id}team"] = pack_team([full_set(teams[side_id][k]) for k in order])
         orders[side_id] = order
     resp = sidecar.rpc(q)
@@ -488,6 +499,7 @@ def selftest(cfg=CFG):
     t.sides["p1"].mega_used = True
     p1[3].active_slot, p1[3].appeared, p1[3].turns_active = 1, True, 1
     p1[3].hp, p1[3].status = 0.42, "brn"
+    p1[3].protect_ct = 2                    # protected twice in a row
     p1[0].appeared, p1[0].item_consumed = True, True     # Blaziken, sash gone
 
     p2 = t.sides["p2"].mons                 # Whimsicott + Kingambit, Metagross down
@@ -514,8 +526,12 @@ def selftest(cfg=CFG):
     assert state["field"]["weather"] == "sandstorm"
     assert "trickroom" in state["field"]["pseudoWeather"]
     assert by_name[0]["Metagross"]["activeTurns"] == 3
+    stall = tea.get("volatiles", {}).get("stall")
+    assert stall and stall.get("counter") == 9, \
+        f"stall volatile not rebuilt: {stall} (protect_ct=2 -> counter 3^2)"
+    assert "stall" not in gross.get("volatiles", {})
     print("reconstruct: OK (megas, boosts, hp/status, faints, items, field, "
-          "side conditions, turn counters all match)")
+          "side conditions, turn + protect counters all match)")
 
     # forks of a reconstructed battle must round-trip like created ones
     assert json.dumps(SidecarBattle.restore(sc, state).save(), sort_keys=True) \

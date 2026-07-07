@@ -1,6 +1,8 @@
 """Behavior cloning on human transitions (both perspectives of every game).
 
-Loss = weighted CE on the two slot actions
+Loss = weighted CE on the joint action (masked 39x39 softmax; legacy per-slot
+       checkpoints instead get the original two-slot CE, so resuming them
+       reproduces v1 training exactly)
      + value_loss_weight * MSE(value, final outcome)
      + aux_set_loss_weight * (CE item + CE ability + BCE moves) on oracle sets.
 
@@ -22,8 +24,9 @@ import torch.nn.functional as F
 from torch.utils.data import (BatchSampler, DataLoader, Dataset,
                               RandomSampler, SequentialSampler)
 
+from actions import N_SLOT_ACTIONS
 from config import CFG
-from models.policy_value import PolicyValueNet
+from models.policy_value import PolicyValueNet, clean_state_dict
 from tokenizer import PositionTokenizer
 
 
@@ -69,9 +72,17 @@ def make_loader(ds, batch_size, shuffle, device, cfg=CFG):
 
 def compute_loss(model, batch, cfg=CFG):
     tokens, acts, value_t, w, items_t, abils_t, moves_t = batch
-    slots, value, (item_lg, abil_lg, move_lg) = model(tokens)
-    ce = (F.cross_entropy(slots[:, 0], acts[:, 0], reduction="none")
-          + F.cross_entropy(slots[:, 1], acts[:, 1], reduction="none"))
+    pol, value, (item_lg, abil_lg, move_lg) = model(tokens)
+    if pol.dim() == 2:                     # joint head: one masked 1521-way CE
+        label = acts[:, 0] * N_SLOT_ACTIONS + acts[:, 1]
+        logits = pol.masked_fill(~model.joint_mask, float("-inf"))
+        ce = F.cross_entropy(logits, label, reduction="none")
+        top1 = logits.argmax(-1) == label
+    else:                                  # legacy per-slot head (v1)
+        ce = (F.cross_entropy(pol[:, 0], acts[:, 0], reduction="none")
+              + F.cross_entropy(pol[:, 1], acts[:, 1], reduction="none"))
+        top1 = ((pol[:, 0].argmax(-1) == acts[:, 0])
+                & (pol[:, 1].argmax(-1) == acts[:, 1]))
     policy_loss = (ce * w).mean()
     value_loss = (F.mse_loss(value, value_t, reduction="none") * w).mean()
 
@@ -86,13 +97,10 @@ def compute_loss(model, batch, cfg=CFG):
 
     loss = (policy_loss + cfg.value_loss_weight * value_loss
             + cfg.aux_set_loss_weight * aux_loss)
-    with torch.no_grad():
-        joint_hit = ((slots[:, 0].argmax(-1) == acts[:, 0])
-                     & (slots[:, 1].argmax(-1) == acts[:, 1])).float().mean()
     # stats stay 0-dim GPU tensors; .item() every step would sync the device
     return loss, {"loss": loss.detach(), "policy": policy_loss.detach(),
                   "value": value_loss.detach(), "aux": aux_loss.detach(),
-                  "top1_joint": joint_hit}
+                  "top1_joint": top1.detach().float().mean()}
 
 
 def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
@@ -102,6 +110,10 @@ def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
                               enabled=device == "cuda")
     for batch in loader:
         batch = [t.to(device, non_blocking=True) for t in batch]
+        # batch dim is dynamic (drop_last=False remainders, val loader):
+        # without this, every new shape recompiles the whole graph
+        for t in batch:
+            torch._dynamo.mark_dynamic(t, 0)
         with torch.set_grad_enabled(opt is not None), autocast:
             loss, stats = compute_loss(model, batch, cfg)
         if opt is not None:
@@ -138,10 +150,14 @@ def main(cfg=CFG):
     else:
         model = PolicyValueNet(tok.vocab_size(), tok.n_tokens,
                                tok.opp_species_positions(), len(tok.move_list),
-                               len(tok.item_list), len(tok.ability_list), cfg).to(device)
+                               len(tok.item_list), len(tok.ability_list), cfg,
+                               policy_head="joint").to(device)
         start_epoch = 0
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: {n_params / 1e6:.1f}M params")
+    if cfg.compile_model and device == "cuda":
+        model = torch.compile(model)   # shares params; checkpoints unaffected
+        print("torch.compile on (first train + first val step build the graphs)")
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
                             weight_decay=cfg.weight_decay,
@@ -172,7 +188,7 @@ def main(cfg=CFG):
               f"aux {tr['aux']:.4f} top1 {tr['top1_joint']:.3f} | "
               f"val loss {va['loss']:.4f} top1 {va['top1_joint']:.3f} | "
               f"{time.time() - t0:.0f}s")
-        ck = {"hp": model.hp, "state": model.state_dict(), "epoch": epoch}
+        ck = {"hp": model.hp, "state": clean_state_dict(model), "epoch": epoch}
         torch.save(ck, last)
         if va["loss"] < best_val:
             best_val = va["loss"]

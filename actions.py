@@ -9,13 +9,17 @@ Per-slot action index (N_SLOT_ACTIONS = 39):
              stable across the battle; converted to Showdown's party position
              only when building a choice string.
 
-A joint action is a pair (slot_a_index, slot_b_index). The model factorizes the
-policy per slot; search and evaluation recombine per-slot distributions into
-joint actions, dropping illegal combos (double mega, both switching to the same
-mon).
+A joint action is a pair (slot_a_index, slot_b_index), flattened to
+slot_a_index * 39 + slot_b_index when a single index is needed (the joint
+policy head, evaluation, search priors). The 39x39 static mask drops combos
+that are illegal in every position (double mega, both switching to the same
+mon); position-specific legality always comes from the sim request via
+legal_joint_actions.
 """
 
 from dataclasses import dataclass
+
+import numpy as np
 
 # target codes
 T_AUTO, T_FOE_A, T_FOE_B, T_ALLY = 0, 1, 2, 3  # AUTO = spread/self/field moves
@@ -57,6 +61,28 @@ def joint_ok(a: SlotAction, b: SlotAction) -> bool:
     if a.kind == "switch" and b.kind == "switch" and a.switch_to == b.switch_to:
         return False
     return True
+
+
+N_JOINT_ACTIONS = N_SLOT_ACTIONS * N_SLOT_ACTIONS  # 1521
+
+
+def joint_index(a: SlotAction, b: SlotAction) -> int:
+    return to_index(a) * N_SLOT_ACTIONS + to_index(b)
+
+
+_static_mask = None
+
+
+def static_joint_mask() -> np.ndarray:
+    """[39, 39] bool, False where joint_ok can never hold."""
+    global _static_mask
+    if _static_mask is None:
+        m = np.ones((N_SLOT_ACTIONS, N_SLOT_ACTIONS), dtype=bool)
+        for a in range(N_SLOT_ACTIONS):
+            for b in range(N_SLOT_ACTIONS):
+                m[a, b] = joint_ok(from_index(a), from_index(b))
+        _static_mask = m
+    return _static_mask
 
 
 def _choice(a: SlotAction, slot: int, party_pos_of_team_idx) -> str:

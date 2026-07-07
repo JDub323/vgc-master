@@ -10,13 +10,14 @@ Three cooperating pieces:
 
 1. **Policy/value network** ([models/policy_value.py](models/policy_value.py)) — a small
    from-scratch transformer (~6 layers, d=256) trained by behavior cloning on
-   ~89k human Champions replays. Given a tokenized position from one player's
-   perspective it outputs (a) per-slot distributions over that player's actions
-   (the doubles action space is factorized: two softmaxes, recombined into joint
-   actions downstream), (b) a value in [-1, 1], (c) an auxiliary prediction of
-   the opponent's hidden sets (representation shaping + a sanity check against
-   the particle filter). Run from both perspectives it proposes "my candidate
-   moves" and "opponent's likely moves"; its job in search is pruning to top-k.
+   ~89k human Champions replays, then fine-tuned by self-play. Given a tokenized
+   position from one player's perspective it outputs (a) a distribution over that
+   player's **joint** action (both doubles slots at once, one masked 39×39
+   softmax — phase 3; v1 checkpoints used two per-slot softmaxes and still load),
+   (b) a value in [-1, 1], (c) an auxiliary prediction of the opponent's hidden
+   sets (representation shaping + a sanity check against the particle filter).
+   Run from both perspectives it proposes "my candidate moves" and "opponent's
+   likely moves"; its job in search is pruning to top-k.
 2. **Belief tracker** ([beliefs.py](beliefs.py)) — a particle filter over opponent sets,
    no neural net. Priors come from train-split team sheets; reveals are hard
    constraints; speed-order and observed-damage evidence kill inconsistent
@@ -123,12 +124,76 @@ no custom battle GUI to maintain):
 from the dataset — legal by construction — to swap in for any replica the
 validator flags.
 
-## Phase 3 — evaluation (next)
+## Phase 3 — self-play, benchmarking, richer beliefs (this phase)
 
-Bot-vs-bot round-robin Elo (random / max-damage / policy-only / policy+search)
-and notebook polish. The gap between policy-only and policy+search is the
-evidence that search adds value. (`Searcher.choose(policy_only=True)` and the
-play.py choosers are the four contestants, already built.)
+Five changes, largest first. The behavior-cloning pipeline (phase 1) still runs
+exactly as above; phase 3 forks from its checkpoint and adds around it.
+
+```bash
+# 0. FIRST, on the box that has the finished phase-1 (537-token) run: freeze it
+#    as an immutable benchmark before anything below changes the token layout.
+python benchmark.py archive v1-bc --notes "phase-1 behavior-cloned baseline"
+
+# then re-prep + retrain on the new layout (561 tokens: +protect, +archetype)
+python data.py prep          # rebuilds shards with the layout-2 tokenizer
+python train.py              # now trains a JOINT-action policy head
+
+# 1. self-play (the main event): fork the BC net, generate -> train -> gate
+python selfplay.py --hours 10        # overnight; resumable, checkpoints each iter
+python selfplay.py --iters 3         # or a fixed number of iterations
+python benchmark.py archive sp-iter8 --ckpt artifacts/checkpoints/selfplay/sp_iter_008.pt
+
+# 2. head-to-head: 100-game series (every ordered pairing of the 10 replica teams)
+python benchmark.py play v1-bc sp-iter8    # who's stronger, with a 95% CI + Elo
+python benchmark.py play current v1-bc     # work-in-progress vs the frozen baseline
+python benchmark.py standings              # Bradley-Terry ratings, segregated by era
+
+# diagnostics for the two model-quality items
+python evaluate.py --switches              # is switching underweighted in the prior?
+python scenarios.py                        # incl. two new diagnostic positions
+```
+
+**Self-play** ([selfplay.py](selfplay.py)) is AlphaZero adapted to simultaneous, hidden-info
+doubles: the DUCT search's root visit distribution (a *joint* mixed strategy)
+is the policy target, the game outcome is the value target, root Dirichlet
+noise + a temperature schedule drive exploration — all confined to a self-play
+path so live-play and evaluation behavior is untouched. Games are CTS-honest
+(the same tracker + filter as everything else). Generation runs `sp_procs`
+subprocesses × `sp_workers` game threads, and every leaf evaluation funnels
+through one `BatchedEvaluator` per process that coalesces the threads' requests
+into batched GPU `predict_batch` calls — the GPU parallelism the simulator
+(real Node engine, CPU-bound) allows.
+
+**Joint policy head.** The policy is now one masked 39×39 softmax over both
+slots' actions instead of two independent per-slot softmaxes, so a slot's
+action is predicted in the context of its partner's (the factorized head could
+not, e.g., condition an attack on the partner's Rage Powder). Old per-slot
+checkpoints still load and play: `PolicyValueNet.from_slot` converts one into a
+joint head that reproduces the factorized distribution *bit-for-bit*, so
+archived phase-1 bundles remain valid opponents.
+
+**Benchmarker** ([benchmark.py](benchmark.py)) freezes checkpoints into immutable bundles
+(ckpt + vocab + config + git hash + an "era" hash of the search/particle
+config) under `artifacts/benchmarks/`, never deleted. A series is every ordered
+pairing of the replica teams; results are stored and rated, and games from
+different eras are kept apart so a logic change never silently pollutes the
+Elo. This is the "test my new idea against the first baseline" workflow —
+archive `v1-bc` once, compare forever.
+
+**EV-spread archetypes** ([beliefs.py](beliefs.py)) widen the particle prior: each
+redacted-spread set expands into low-dimensional archetypes (fast /
+bulky-physical / bulky-special / bulky-attacker / max-offense / mixed / "any"),
+each with concrete Champions stat points. Speed and damage evidence become
+*exact* per archetype particle instead of one-sided bounds, so move order and
+observed damage discriminate spreads. The posterior over archetypes is a new
+belief token.
+
+**Protect counter** ([data.py](data.py), [env.py](env.py), [tokenizer.py](tokenizer.py)) tracks the
+consecutive-protect (stall) counter for both sides — the "can I Protect again
+risk-free" flag — verified against the pinned sim (the counter triples per
+consecutive use; Wide/Quick Guard never fail from it but do increment it).
+`env.reconstruct` now rebuilds the stall volatile, closing part of the
+documented Protect-streak reconstruction gap; `env.py --selftest` asserts it.
 
 ---
 
@@ -404,7 +469,9 @@ All gated behind flags; zero cost when off ([search/debug.py](search/debug.py)):
 | [damage.py](damage.py) | Cached JSON-lines bridge to `@smogon/calc`. Exists because damage math must match the games's exact formulas, forward (features) and backward (likelihoods). |
 | [beliefs.py](beliefs.py) | Particle filter over opponent sets + `--audit`. Exists to turn the hidden-information problem into concrete sampled sets the search can determinize over. |
 | [tokenizer.py](tokenizer.py) | Fixed-layout position encoder (537 tokens) + vocab building. Exists as the single, swappable definition of "what the network sees". |
-| [models/policy_value.py](models/policy_value.py) | Small transformer: per-slot policy, value, aux set prediction. Exists as the learned prior/evaluator; small because search calls it constantly. |
+| [models/policy_value.py](models/policy_value.py) | Small transformer: joint (or legacy per-slot) policy, value, aux set prediction. `from_slot` converts v1 checkpoints; `clean_state_dict` keeps torch.compile out of checkpoints. Exists as the learned prior/evaluator; small because search calls it constantly. |
+| [selfplay.py](selfplay.py) | AlphaZero-style self-play: batched-GPU generation, replay buffer, soft-target training, per-iteration gate. Exists to let the bot learn from its own play, not just human clones. |
+| [benchmark.py](benchmark.py) | Immutable model archives + model-vs-model series (Elo/BT, era-segregated). Exists so every change can be measured against a frozen baseline that is never lost. |
 | [models/baselines.py](models/baselines.py) | Random and max-damage policies. Exist so every benchmark has a floor. |
 | [train.py](train.py) | Behavior cloning loop with AMP/cosine/resume. Exists to fit the network; nothing else trains anything. |
 | [evaluate.py](evaluate.py) | Predictor metrics, headline pruned-set recall@k. Exists to certify that top-k pruning is safe before search trusts it. |
