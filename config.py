@@ -90,6 +90,7 @@ class Config:
     # so Linux big box yes, Windows laptop no). Checkpoints stay eager-keyed
     # either way (models/policy_value.clean_state_dict).
     compile_model: bool = True
+    #                                        torch.compile warmup util/memory spike
 
     # ---- search (phase 2) ----
     top_k_actions: int = 6                 # per-player pruning width; also eval recall@k
@@ -98,15 +99,29 @@ class Config:
     play_temperature: float = 1.0
     solve_endgame_at: int = 2              # solve to terminal when <=N mons per side
     c_puct: float = 1.5                    # exploration constant in decoupled PUCT
+    rollout_depth: int = 1                 # plies of real sim (greedy) before the
+    #                                        value head is trusted at a new leaf.
+    #                                        1 = evaluate the leaf immediately (v2
+    #                                        default); >1 looks that many turns
+    #                                        further so myopic-HP value mistakes
+    #                                        (e.g. double-Protect) surface as the
+    #                                        opponent's follow-up gets played out.
 
     # ---- self-play (phase 3) ----
-    # Sized so one overnight big-box run (~8-12h) completes tens of
-    # generate->train iterations. Throughput scales with procs x workers
-    # (each worker owns 3 node processes); re-run env.py --benchmark on the
-    # target box and adjust sp_sims / sp_workers to taste.
-    sp_procs: int = 2                      # generator subprocesses (beat the GIL)
-    sp_workers: int = 8                    # game threads per generator process
-    sp_games_per_iter: int = 400
+    # Throughput scales with procs x workers (each worker owns 2 node
+    # processes: a shared sidecar + the damage bridge); re-run env.py
+    # --benchmark on the target box and adjust to taste. Current values are
+    # deliberately tiny for a co-tenant GPU: 1 proc x 2 workers keeps the
+    # network-eval batches small so generation sits at single-digit % GPU
+    # util (the workload is CPU/Node-bound anyway), and small games/iter keeps
+    # each generate->train->checkpoint cycle to a couple hours.
+    sp_procs: int = 3                      # generator subprocesses (beat the GIL)
+    sp_workers: int = 4                    # game threads per generator process
+    #                                        procs*workers = concurrent games:
+    #                                        3*4=12 (was 1*2=2). Bigger batches to
+    #                                        the per-proc GPU evaluator + more sim
+    #                                        parallelism across the 64 cores.
+    sp_games_per_iter: int = 150
     sp_sims: int = 160                     # search budget while generating
     sp_buffer_iters: int = 5               # train on the last N iterations
     sp_epochs_per_iter: int = 2

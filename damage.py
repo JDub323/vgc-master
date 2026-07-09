@@ -9,7 +9,6 @@ what makes per-particle likelihood evaluation affordable.
 
 import json
 import re
-import subprocess
 
 from config import CFG
 
@@ -75,13 +74,8 @@ rl.on('line', (line) => {
 
 class DamageBridge:
     def __init__(self, cfg=CFG):
-        cfg.node_dir.mkdir(parents=True, exist_ok=True)
-        js = cfg.node_dir / "dmg_bridge.js"
-        js.write_text(_BRIDGE_JS)
-        self.proc = subprocess.Popen(
-            [cfg.node_bin, str(js.resolve())], cwd=cfg.node_dir,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-            encoding="utf-8", bufsize=1)
+        from env import spawn_node
+        self.proc, self._stderr_tail = spawn_node(cfg, "dmg_bridge.js", _BRIDGE_JS)
         self.cache = {}
         self.hits = self.misses = 0   # read by the search debug report
 
@@ -115,7 +109,8 @@ class DamageBridge:
                 if not line:
                     raise RuntimeError(
                         f"damage bridge exited (code {self.proc.poll()}) "
-                        f"mid-batch; last request: {reqs[chunk[0][1]]}")
+                        f"mid-batch; last request: {reqs[chunk[0][1]]}; "
+                        f"stderr:\n{self._stderr_tail()}")
                 out = json.loads(line)
                 val = None if "err" in out or not out["maxhp"] else (
                     out["min"] / out["maxhp"], out["max"] / out["maxhp"])
@@ -123,7 +118,10 @@ class DamageBridge:
         return [self.cache[k] for k in keys]
 
     def close(self):
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass                           # already dead; don't mask the real error
         self.proc.wait()
 
 

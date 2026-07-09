@@ -21,13 +21,63 @@ falls back to gen9doublescustomgame, which allows megas and has no tera.
 """
 
 import json
+import os
 import random
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+from collections import deque
 
 from config import CFG
 from data import LogParser, Side, parse_packed_team, sid
+
+
+def _write_atomic(path, content):
+    """Write `content` to `path` atomically. Many worker processes race to
+    materialize the same node script; a plain write_text can hand `node` a
+    half-written file (-> SyntaxError -> instant exit -> broken pipe). Writing
+    to a temp file and os.replace-ing is atomic, and identical content makes
+    concurrent replaces harmless."""
+    try:
+        if path.exists() and path.read_text() == content:
+            return
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def spawn_node(cfg, js_name, js_source):
+    """Materialize `js_source` as cfg.node_dir/js_name and launch node on it,
+    draining stderr on a background thread so a crash reason survives (node's
+    stderr would otherwise be lost, leaving only cryptic broken pipes on the
+    Python side). Returns (proc, stderr_tail) where stderr_tail() -> str."""
+    cfg.node_dir.mkdir(parents=True, exist_ok=True)
+    js = cfg.node_dir / js_name
+    _write_atomic(js, js_source)
+    proc = subprocess.Popen(
+        [cfg.node_bin, str(js.resolve())], cwd=cfg.node_dir,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", bufsize=1)
+    tail = deque(maxlen=50)
+
+    def drain():
+        for line in proc.stderr:
+            tail.append(line)
+
+    threading.Thread(target=drain, daemon=True).start()
+    return proc, lambda: "".join(tail).strip()
 
 _SIDECAR_JS = r"""
 const sim = require('pokemon-showdown');
@@ -213,25 +263,32 @@ rl.on('line', (line) => {
 
 class Sidecar:
     def __init__(self, cfg=CFG):
-        cfg.node_dir.mkdir(parents=True, exist_ok=True)
-        js = cfg.node_dir / "sidecar.js"
-        js.write_text(_SIDECAR_JS)
-        self.proc = subprocess.Popen(
-            [cfg.node_bin, str(js.resolve())], cwd=cfg.node_dir,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-            encoding="utf-8", bufsize=1)
+        self.proc, self._stderr_tail = spawn_node(cfg, "sidecar.js", _SIDECAR_JS)
         self._rid = 0
 
     def rpc(self, obj):
         self._rid += 1
-        self.proc.stdin.write(json.dumps({**obj, "rid": self._rid}) + "\n")
-        self.proc.stdin.flush()
-        out = json.loads(self.proc.stdout.readline())
+        try:
+            self.proc.stdin.write(json.dumps({**obj, "rid": self._rid}) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            raise RuntimeError(
+                f"sidecar died before op {obj.get('op')!r} "
+                f"(code {self.proc.poll()}); stderr:\n{self._stderr_tail()}")
+        line = self.proc.stdout.readline()
+        if not line:                       # node exited: stdout closed
+            raise RuntimeError(
+                f"sidecar exited on op {obj.get('op')!r} "
+                f"(code {self.proc.poll()}); stderr:\n{self._stderr_tail()}")
+        out = json.loads(line)
         assert out.get("rid") == self._rid and "err" not in out, out.get("err", out)
         return out
 
     def close(self):
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass                           # already dead; don't mask the real error
         self.proc.wait()
 
 

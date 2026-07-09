@@ -42,3 +42,54 @@ python3 teams.py --validate
 
 # play against the bot in the official Showdown client (spawns local server + dashboard)
 python3 play.py
+
+# Example pipeline:
+
+0. Push here, then get the branch on the box
+# on your laptop
+git push -u origin phase-3-selfplay
+
+# on the big box (currently on master, clean)
+git fetch origin
+git checkout phase-3-selfplay
+git log --oneline -1          # confirm: ae91200 phase 3: self-play...
+
+1. Freeze the phase-1 baseline — MUST be first
+This copies the current (layout-1) vocab.json + ckpt_best.pt before step 3 overwrites them.
+python benchmark.py archive v1-bc --notes "phase-1 behavior-cloned baseline"
+python benchmark.py list       # verify: v1-bc, head=slot, tokens=537
+
+2. Verify the untested code against real Node (do before retraining)
+python env.py --selftest       # reconstruct incl. NEW stall-counter assert — most likely failure point
+python beliefs.py --audit      # archetype expansion: depletion / in-prior rates
+python scenarios.py            # search gates + 2 new diagnostic scenarios (non-gating)
+
+# optional: profile before committing to the overnight run, to size self-play
+python env.py --benchmark      # sims/sec + forks/sec on THIS box
+
+3. Re-prep + retrain the predictor (layout 2, joint head)
+python data.py prep            # rebuilds shards at 561 tokens (overwrites vocab.json)
+python train.py                # joint-head BC; torch.compile on if CUDA
+
+4. Confirm the new predictor before self-play
+python evaluate.py             # recall@k must hold up vs baselines
+
+# optional diagnostics for your specific concerns
+python evaluate.py --switches  # is switching underweighted in the prior?
+python evaluate.py --worst 20  # where the joint head still misreads
+python evaluate.py --aux       # aux set-prediction vs beliefs.py --audit
+
+# gate: is the retrained predictor at least as strong as frozen v1?
+python benchmark.py play current v1-bc
+
+5. Self-play (only after step 4 looks good)
+python selfplay.py --hours 10          # resumable; re-run to continue
+
+# after it runs: archive a milestone and measure the gain
+python benchmark.py archive sp-iter8 --ckpt artifacts/checkpoints/selfplay/sp_iter_008.pt
+python benchmark.py play sp-iter8 v1-bc
+python benchmark.py standings
+
+One note: if env.py --selftest or scenarios.py fails in step 2, stop and fix before step 3
+— those exercise the reconstruct/stall/archetype code that has never run against real Node,
+and retraining on top of a broken tokenizer wastes the long training run.

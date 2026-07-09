@@ -52,6 +52,14 @@ def base_species(species: str) -> str:
     return re.sub(r"-Mega(-[XY])?$", "", species)
 
 
+def _forme_base(species: str) -> str:
+    """Base-species sid of a display-form name ('Floette-Eternal' -> 'floette').
+    The forme suffix follows a hyphen, so this is safe against distinct species
+    that merely share a prefix ('Mewtwo' -> 'mewtwo', never 'mew'). A sid-form
+    name ('floetteeternal') has no hyphen and yields itself unchanged."""
+    return sid(species.split("-")[0])
+
+
 # moves whose SUCCESS starts/refreshes the sim's stall counter (announced as
 # |-singleturn|; verified against pinned pokemon-showdown e440c4a: the ten
 # protect-likes both check and add the counter, Wide/Quick Guard add it
@@ -124,12 +132,21 @@ class Side:
         # (p1b: Floette / Floette-Eternal), or vice versa — match on full sid,
         # then on the part before the forme dash (Species Clause makes the
         # base name unique within a team)
-        want = details.split(",")[0] if details else nickname
-        chunk = want.split("-")[0]
-        m = next(m for m in self.mons
-                 if sid(m.set["species"]) == sid(want)
-                 or sid(m.species_cur) == sid(want)
-                 or m.set["species"].split("-")[0] == chunk)
+        want = sid(details.split(",")[0] if details else nickname)
+        m = next((m for m in self.mons
+                  if want == sid(m.set["species"]) or want == sid(m.species_cur)
+                  # regional/forme base-name match. The sim emits the BASE
+                  # display name ('Floette' for Floette-Eternal). species_cur is
+                  # display-form ('Floette-Eternal'), so its hyphen-split base
+                  # sids to 'floette' and matches; the old code split
+                  # set["species"] instead, which for a belief-sampled set is
+                  # sid-form ('floetteeternal', no hyphen) and never matched.
+                  or want == _forme_base(m.species_cur)
+                  or want == _forme_base(m.set["species"])), None)
+        if m is None:
+            # never crash a whole rollout/game over one unresolved ident: a
+            # StopIteration here silently discarded every sample from the game
+            m = self.active(0) or self.active(1) or self.mons[0]
         self.by_name[nickname] = m
         return m
 
@@ -593,8 +610,20 @@ def battle_weight(rec, p, max_ts, cfg=CFG):
             * 0.5 ** (age_days / cfg.recency_halflife_days))
 
 
-def prep(cfg=CFG):
-    """Parsed battles -> tokenized npz shards, running beliefs + damage calc."""
+def prep(cfg=CFG, resume=False):
+    """Parsed battles -> tokenized npz shards, running beliefs + damage calc.
+
+    resume: keep the shards already on disk and only regenerate what's missing.
+        Battles are assigned per-split (rec["split"]) and processed in a fixed
+        deterministic order, so we replay that order, cheaply counting how many
+        transitions each battle would contribute to its split, and SKIP any
+        battle that already lies fully within an on-disk shard for that split.
+        The remaining battles (all of a split that never got flushed, e.g. val/
+        test, plus the tail of train) are regenerated and appended after the
+        existing shards. Note: a split resumes only on a whole-shard boundary,
+        so any split with a partial final buffer (never flushed) restarts from
+        scratch for that split -- which is exactly the val/test case.
+    """
     import numpy as np
     from beliefs import OpponentBelief
     from damage import DamageBridge, damage_features
@@ -616,6 +645,21 @@ def prep(cfg=CFG):
     bufs = {s: defaultdict(list) for s in ("train", "val", "test")}
     shard_n = {s: 0 for s in bufs}
 
+    # On resume, count how many transitions are already safely on disk per split.
+    # A battle is skipped only if its split's cumulative transition count stays
+    # within `done[split]` -- i.e. it lies fully inside an existing shard.
+    done = {s: 0 for s in bufs}
+    seen = {s: 0 for s in bufs}
+    if resume:
+        for f in sorted(cfg.prepped_dir.glob("*.npz")):
+            split = f.stem.rsplit("_", 1)[0]
+            if split in shard_n:
+                done[split] += len(np.load(f)["tokens"])
+                shard_n[split] += 1
+        print(f"resume: on disk -> " +
+              ", ".join(f"{s}: {shard_n[s]} shards / {done[s]} transitions"
+                        for s in bufs))
+
     def flush(split, force=False):
         buf = bufs[split]
         if not buf["tokens"] or (not force and len(buf["tokens"]) < cfg.shard_size):
@@ -633,7 +677,18 @@ def prep(cfg=CFG):
         shard_n[split] += 1
         bufs[split] = defaultdict(list)
 
+    def n_transitions(rec):
+        return sum(1 for p in ("p1", "p2") for turn in rec["turns"]
+                   if turn["states"] is not None and turn["actions"][p] is not None)
+
     for bi, rec in enumerate(all_battles):
+        split = rec["split"]
+        if resume:
+            # Skip battles already fully captured in on-disk shards for their split.
+            nt = n_transitions(rec)
+            if seen[split] + nt <= done[split]:
+                seen[split] += nt
+                continue
         for p in ("p1", "p2"):
             opp = "p2" if p == "p1" else "p1"
             belief = OpponentBelief([sid(s["species"]) for s in rec["teams"][opp]],
@@ -675,4 +730,4 @@ if __name__ == "__main__":
     if step in ("parse", "all"):
         parse()
     if step in ("prep", "all"):
-        prep()
+        prep(resume="resume" in sys.argv[2:])

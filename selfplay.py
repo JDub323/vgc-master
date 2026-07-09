@@ -152,11 +152,16 @@ class RecorderBot(Bot):
         return joint_choice(request, joint, self.name_to_idx), info
 
 
-def play_selfplay_game(sc, bots, sets_by_side, cfg, rng, max_turns=300):
-    """Same skeleton as benchmark.run_game, plus the temperature schedule."""
+def play_selfplay_game(sc, bots, sets_by_side, cfg, rng, max_turns=300,
+                       feed=None):
+    """Same skeleton as benchmark.run_game, plus the temperature schedule.
+    Optional `feed` (a spectate.GameFeed) streams the game to the live
+    dashboard + replay saver, so training self-play is watchable too."""
     b = SidecarBattle.create(sc, cfg.format_id,
                              pack_team(sets_by_side["p1"]),
                              pack_team(sets_by_side["p2"]))
+    if feed:
+        feed.feed(b.log)
     for bot in bots.values():
         bot.feed(b.log)
     turns = 0
@@ -176,16 +181,22 @@ def play_selfplay_game(sc, bots, sets_by_side, cfg, rng, max_turns=300):
                     else cfg.sp_final_temp
                 choices[side], _ = bot.decide(req, temp)
         resp = b.step(choices)
+        if feed:
+            feed.feed(resp["log"])
         for bot in bots.values():
             bot.feed(resp["log"])
         if resp["errors"]:
             resp = b.step({s: "default" for s in resp["errors"]})
+            if feed:
+                feed.feed(resp["log"])
             for bot in bots.values():
                 bot.feed(resp["log"])
         turns += 1
         if turns >= max_turns:
             break
     winner = b.winner if b.ended else None
+    if feed:
+        feed.finish(winner)
     b.destroy()
     return winner
 
@@ -241,8 +252,10 @@ def generate_games(model, tok, cfg, n_games, workers, seed, verbose=True):
 
     def worker(wid):
         rng = random.Random((seed << 16) + wid)
-        searcher = Searcher(evaluator, tok, cfg, seed=(seed << 16) + wid)
         sc = Sidecar(cfg)
+        # one shared sidecar for the game AND this worker's search (was 2)
+        searcher = Searcher(evaluator, tok, cfg, seed=(seed << 16) + wid,
+                            sidecar=sc)
         try:
             while True:
                 with lock:
@@ -401,9 +414,10 @@ def gate(model_new, model_old, tok, cfg, n_games, workers=4):
     lock, score = threading.Lock(), [0.0]
 
     def worker(wid):
-        sn = Searcher(model_new, tok, cfg, seed=wid)
-        so = Searcher(model_old, tok, cfg, seed=1000 + wid)
         sc = Sidecar(cfg)
+        # both searchers share the game sidecar (sequential use in one thread)
+        sn = Searcher(model_new, tok, cfg, seed=wid, sidecar=sc)
+        so = Searcher(model_old, tok, cfg, seed=1000 + wid, sidecar=sc)
         try:
             while True:
                 with lock:

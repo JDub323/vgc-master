@@ -153,19 +153,26 @@ class DetGame:
 
 
 class Searcher:
-    def __init__(self, model, tok, cfg=CFG, seed=0, debug=False):
+    def __init__(self, model, tok, cfg=CFG, seed=0, debug=False, sidecar=None):
         self.model, self.tok, self.cfg = model, tok, cfg
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)
-        self.sc = Sidecar(cfg)
+        # A caller can hand us a Sidecar to share (self-play/gate workers pass
+        # the game sidecar, so one node process serves the whole worker instead
+        # of one-per-searcher). Battles are keyed by id and a worker's calls are
+        # sequential, so sharing is safe. Only close what we own.
+        self._own_sc = sidecar is None
+        self.sc = Sidecar(cfg) if sidecar is None else sidecar
         self.bridge = DamageBridge(cfg) if cfg.use_damage_features else None
         self.dbg = SearchDebug(debug)
         self.health = Counter()
 
     def close(self):
         """Shut down this searcher's node processes (benchmark/self-play
-        workers spawn many searchers; long-lived scripts should not leak)."""
-        self.sc.close()
+        workers spawn many searchers; long-lived scripts should not leak).
+        An injected sidecar is owned by the caller and left open."""
+        if self._own_sc:
+            self.sc.close()
         if self.bridge:
             self.bridge.close()
 
@@ -274,7 +281,10 @@ class Searcher:
               f"fidelity signal), forced switches {int(h['forced_switches'])}, "
               f"terminals {int(h['terminals'])}, value leaves "
               f"{int(h['value_leaves'])}, depth avg "
-              f"{h['depth_sum'] / max(1, sims):.1f} max {int(h['depth_max'])}")
+              f"{h['depth_sum'] / max(1, sims):.1f} max {int(h['depth_max'])}, "
+              f"leaf-eval depth avg "
+              f"{h['leaf_depth_sum'] / max(1, int(h['value_leaves'])):.2f} "
+              f"(rollout_depth={self.cfg.rollout_depth})")
         if self.bridge:
             tot = max(1, self.bridge.hits + self.bridge.misses)
             print(f"bridge cache: {self.bridge.hits}/{tot} hits "
@@ -320,9 +330,9 @@ class Searcher:
             if child is None:
                 child = self._expand(det, b, trk)
                 node.children[(i, j)] = child
-                if not det.solve:          # AlphaZero-style: net value at the leaf
-                    h["value_leaves"] += 1
-                    z = child.value
+                if not det.solve:          # AlphaZero-style: net value at the leaf,
+                    h["value_leaves"] += 1  # optionally after a few greedy real plies
+                    z = self._leaf_value(det, b, trk, child)
                     break
             node = child                   # solve mode: keep going to terminal
         h["depth_sum"] += len(path)
@@ -331,6 +341,44 @@ class Searcher:
             b.destroy()
         for n_, i_, j_ in path:
             n_.update(i_, j_, z if z is not None else 0.0)
+
+    def _leaf_value(self, det, b, trk, leaf):
+        """Value backed up from a freshly expanded leaf. With rollout_depth=1
+        this is just the net value at the leaf (AlphaZero default). With depth D
+        we play D-1 extra plies of the real sim, both sides taking the greedy
+        (argmax-prior) joint action, then evaluate the net at the deeper
+        position — so a leaf that only *looks* good because it preserves HP
+        (double-Protect) is scored after the opponent's follow-up actually
+        happens. A game that ends inside the lookahead returns the true result."""
+        h = self.health
+        node, reached = leaf, 1
+        for _ in range(max(1, self.cfg.rollout_depth) - 1):
+            if b.ended:
+                break
+            i, j = int(np.argmax(node.my_p)), int(np.argmax(node.opp_p))
+            with self.dbg("step"):
+                resp = b.step({
+                    det.my: joint_choice(b.requests[det.my], node.my_actions[i],
+                                         det.name_to_idx[det.my]),
+                    det.opp: joint_choice(b.requests[det.opp], node.opp_actions[j],
+                                          det.name_to_idx[det.opp])})
+            for line in resp["log"]:
+                trk.feed(line)
+            if resp["errors"]:
+                h["fallbacks"] += 1
+                with self.dbg("step"):
+                    resp = b.step({s: "default" for s in resp["errors"]})
+                for line in resp["log"]:
+                    trk.feed(line)
+            self._settle(b, trk)
+            reached += 1
+            if b.ended:
+                break
+            node = self._expand(det, b, trk)
+        h["leaf_depth_sum"] += reached
+        if b.ended:
+            return {det.my: 1.0, det.opp: -1.0}.get(b.winner, 0.0)
+        return node.value
 
     def _settle(self, b, trk):
         """Play out forced switches inside a simulation (random legal switch,

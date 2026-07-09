@@ -16,12 +16,21 @@ under test is the model, each loaded with its own head architecture and
 tokenizer layout via its bundle.
 
 CLI: python benchmark.py archive <name> [--ckpt path] [--notes "..."]
+     python benchmark.py rename <old> <new>
      python benchmark.py list
      python benchmark.py play <A> <B> [--sims N] [--workers W] [--temp T]
                                       [--repeat R] [--quick N]
+                                      [--teams t1,t2,...] [--spectate]
+                                      [--port P] [--no-save]
      python benchmark.py standings
 "current" as a contestant name means the live artifacts (ckpt_best.pt +
 vocab.json), so you can fight work-in-progress against any archive.
+Every play run saves .log + browser-openable .html replays under
+artifacts/replays/<A>_vs_<B>/ (--no-save to skip). --spectate also serves a
+live dashboard (http://localhost:PORT) to flip between parallel games.
+--teams restricts to games where team A is one of the named teams, replaying
+those matchups with their original game seeds (the per-game seed index is
+preserved; outcomes reproduce up to GPU/thread float nondeterminism in search).
 """
 
 import dataclasses
@@ -113,6 +122,27 @@ def archive(name, ckpt=None, notes="", cfg=CFG):
           f"n_tokens={hp['n_tokens']}, era={era_hash(cfg)}")
 
 
+def rename(old, new, cfg=CFG):
+    """Rename an archived bundle and migrate every registry result that
+    references it, so standings/history stay consistent under the new name."""
+    src, dst = bench_dir(cfg) / old, bench_dir(cfg) / new
+    assert src.exists(), f"no bundle named '{old}'"
+    assert not dst.exists(), f"'{new}' already exists"
+    src.rename(dst)
+    meta = json.loads((dst / "meta.json").read_text())
+    meta["name"] = new
+    (dst / "meta.json").write_text(json.dumps(meta, indent=1))
+    reg = load_registry(cfg)
+    migrated = 0
+    for r in reg["results"]:
+        for side in ("a", "b"):
+            if r.get(side) == old:
+                r[side] = new
+                migrated += 1
+    save_registry(reg, cfg)
+    print(f"renamed '{old}' -> '{new}'  ({migrated} registry entries migrated)")
+
+
 def list_bundles(cfg=CFG):
     cur_era = era_hash(cfg)
     rows = []
@@ -156,11 +186,16 @@ class Contestant:
             f"{name}: checkpoint/vocab layout mismatch"
 
 
-def run_game(sc, bots, sets_by_side, cfg, temperature, rng, max_turns=300):
-    """One quiet CTS-honest game. Returns (winner side id or None, turns)."""
+def run_game(sc, bots, sets_by_side, cfg, temperature, rng, max_turns=300,
+             feed=None):
+    """One quiet CTS-honest game. Returns (winner side id or None, turns).
+    If `feed` (a spectate.GameFeed) is given, streams the protocol to it for
+    live spectating + replay saving."""
     b = SidecarBattle.create(sc, cfg.format_id,
                              pack_team(sets_by_side["p1"]),
                              pack_team(sets_by_side["p2"]))
+    if feed:
+        feed.feed(b.log)
     for bot in bots.values():
         bot.feed(b.log)
     turns = 0
@@ -178,16 +213,22 @@ def run_game(sc, bots, sets_by_side, cfg, temperature, rng, max_turns=300):
             else:
                 choices[side], _ = bot.decide(req, temperature)
         resp = b.step(choices)
+        if feed:
+            feed.feed(resp["log"])
         for bot in bots.values():
             bot.feed(resp["log"])
         if resp["errors"]:
             resp = b.step({s: "default" for s in resp["errors"]})
+            if feed:
+                feed.feed(resp["log"])
             for bot in bots.values():
                 bot.feed(resp["log"])
         turns += 1
         if turns >= max_turns:      # stall war: call it a tie, don't hang
             break
     winner = b.winner if b.ended else None
+    if feed:
+        feed.finish(winner)
     b.destroy()
     return winner, turns
 
@@ -202,18 +243,38 @@ def series_pairings(team_names, repeat=1, quick=None, seed=7):
 
 
 def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
-               workers=4, repeat=1, quick=None, record=True, verbose=True):
-    """The 100-game (per repeat) series. Returns the result rows."""
+               workers=4, repeat=1, quick=None, record=True, verbose=True,
+               only_teams=None, spectate=False, save_replays=True,
+               port=8020, depth=None, label=None):
+    """The 100-game (per repeat) series. Returns the result rows.
+
+    only_teams: restrict to games where team_a is in this set. The game index g
+    is preserved from the full pairing list, so each game keeps its original
+    seed and side assignment (outcomes reproduce up to GPU/thread float
+    nondeterminism in search).
+    spectate: serve a live dashboard; save_replays: write .log/.html per game."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     run_cfg = dataclasses.replace(
-        cfg, sims_per_move=sims or cfg.sims_per_move)
+        cfg, sims_per_move=sims or cfg.sims_per_move,
+        rollout_depth=depth or cfg.rollout_depth)
     A = Contestant(name_a, cfg, device)
     B = Contestant(name_b, cfg, device)
     usage = json.loads((cfg.artifacts_dir / "usage_stats.json").read_text())
     team_names = list(teams_mod.TEAMS)
     team_sets = {t: teams_mod.get(t) for t in team_names}
     jobs = [(g, ta, tb) for g, (ta, tb) in
-            enumerate(series_pairings(team_names, repeat, quick))]
+            enumerate(series_pairings(team_names, repeat, quick))
+            if not only_teams or ta in only_teams]
+
+    spectator = None
+    if spectate or save_replays:
+        from spectate import Spectator
+        run_tag = f"{name_a}_vs_{name_b}" + (f"_{label}" if label else "")
+        spectator = Spectator(run_tag, cfg, live=spectate, port=port,
+                              save=save_replays)
+        if save_replays and not spectate:
+            print(f"  saving replays under {spectator.dir}/")
+
     jobs_lock, results, t0 = threading.Lock(), [], time.time()
 
     def worker():
@@ -238,12 +299,16 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                                       sets[side_of["b"]], sa, usage, run_cfg),
                     side_of["b"]: Bot(side_of["b"], sets[side_of["b"]],
                                       sets[side_of["a"]], sb, usage, run_cfg)}
+                feed = spectator.new_game(name_a, name_b, ta, tb, side_of,
+                                          run_cfg.format_id) \
+                    if spectator else None
                 winner, turns = run_game(sc, bots, sets, run_cfg,
-                                         temperature, rng)
+                                         temperature, rng, feed=feed)
                 res = {"a": name_a, "b": name_b, "team_a": ta, "team_b": tb,
                        "winner": {side_of["a"]: "a", side_of["b"]: "b"}.get(
                            winner, "tie"),
                        "turns": turns, "sims": run_cfg.sims_per_move,
+                       "rollout_depth": run_cfg.rollout_depth,
                        "temp": temperature, "date": date.today().isoformat(),
                        "era_a": A.meta.get("era", ""),
                        "era_b": B.meta.get("era", ""),
@@ -367,13 +432,22 @@ def main(cfg=CFG):
         archive(args[1], ckpt=opt("--ckpt"), notes=opt("--notes", ""), cfg=cfg)
     elif cmd == "list":
         list_bundles(cfg)
+    elif cmd == "rename":
+        rename(args[1], args[2], cfg=cfg)
     elif cmd == "play":
+        teams_opt = opt("--teams")
         run_series(args[1], args[2], cfg,
                    sims=int(opt("--sims", 0)) or None,
                    temperature=float(opt("--temp", 0.0)),
                    workers=int(opt("--workers", 4)),
                    repeat=int(opt("--repeat", 1)),
-                   quick=int(opt("--quick", 0)) or None)
+                   quick=int(opt("--quick", 0)) or None,
+                   only_teams=set(teams_opt.split(",")) if teams_opt else None,
+                   spectate="--spectate" in args,
+                   save_replays="--no-save" not in args,
+                   port=int(opt("--port", 8020)),
+                   depth=int(opt("--depth", 0)) or None,
+                   label=opt("--label"))
     elif cmd == "standings":
         standings(cfg)
     else:

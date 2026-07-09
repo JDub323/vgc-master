@@ -126,7 +126,13 @@ def legal_slot_actions(request: dict, slot: int, team_idx_of_party_pos) -> list:
     if not slot_req.get("trapped"):
         for pos, mon in enumerate(side["pokemon"], start=1):
             if mon["condition"] != "0 fnt" and not mon["active"]:
-                acts.append(SlotAction("switch", switch_to=team_idx_of_party_pos(pos)))
+                try:
+                    idx = team_idx_of_party_pos(pos)
+                except KeyError:
+                    continue   # party slot we can't map to a team-preview idx
+                               # (forme/transform divergence in a simulated
+                               # playout) — skip as a switch target, don't crash
+                acts.append(SlotAction("switch", switch_to=idx))
     for mslot, mv in enumerate(slot_req["moves"]):
         if mv.get("disabled") or mv.get("pp") == 0:
             continue
