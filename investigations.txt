@@ -1,0 +1,144 @@
+investigations.txt
+===================
+A running list of ideas for FUTURE steps that could boost performance. Not a
+task tracker and not a commitment -- each entry is a hypothesis with enough
+context to pick up cold later. Newest at the bottom. When an idea is
+implemented or rejected, mark it [DONE] / [REJECTED] with a one-line reason
+rather than deleting it, so we keep the reasoning trail.
+
+
+[OPEN] Defender-side EV/bulk inversion -- use OUR attacks for stricter particle death
+-------------------------------------------------------------------------------------
+Context: we are adding an EXACT damage-inversion for the ATTACKER side first
+(damage WE take -> feasible interval for the opponent's attack SP + nature),
+because that case has a single continuous unknown and our defender is known
+exactly, so it is clean, high-confidence, and low bug-risk. See beliefs.py
+_damage_evidence and the @smogon/calc forward chain (getBaseDamage util.js:507,
+getFinalDamage util.js:549, pokeRound util.js:695).
+
+The idea here is the mirror: use the damage WE deal to the opponent to strictly
+kill particles about THEIR defensive investment (HP / Def / SpD SP), via the
+same exact monotone-floor inversion, instead of the current loose one-sided
+slack (_bulk_slack). Deliberately DEFERRED, per direction on 2026-07-08: keep
+the old conservative defensive slack for now and only go strict on the attacker
+side.
+
+Why it is harder / why it waits:
+  - Two coupled continuous unknowns: observed frac = dmg(Def_SP) / maxHP(HP_SP),
+    so it inverts to a 2-D feasible region (loop the ~33 HP-SP values, invert
+    Def-SP per value), not a 1-D interval.
+  - The observation is a quantized HP% coupled to maxHP (HP SP), stacking a
+    second rounding source on top of the calc truncation.
+  - More ways to wrongly kill the true set: our own damage roll, plus their
+    hidden bulk items/abilities (Assault Vest, Eviolite, Multiscale, Fur Coat)
+    each shift the calc; a strict test is more fragile here than on attack.
+Payoff is real (defensive spreads are a big slice of the redacted-SP blind
+spot) but lower-confidence than the attacker side, so prove the round-trip
+validation harness on the 1-D attacker case first, then extend the same machine
+to the 2-D region.
+
+
+[DONE 2026-07-08] Speed evidence: exact SP-interval instead of per-archetype binary
+-----------------------------------------------------------------------------------
+Implemented: _strict_speed_mults (beliefs.py) narrows a per-particle feasible
+speed-SP band from each same-priority move-order fact and kills only when the
+band empties. Config strict_speed_ev (default on). Context audit shipped as
+tests/test_strict_inversion.py (96-scenario sweep over scarf/tailwind/paralysis/
+boosts/TR + a Trick-Room-flip test): every keep/kill matches an independent
+brute force, so NO speed-context tracking bug exists -- the old over-kill was
+purely the coarse archetype grid. Audit A/B: speed true-set kills 8 vs old 9
+(marginally better, no regression).
+
+
+[DONE 2026-07-08] Attacker-side damage inversion (damage WE take -> attack SP)
+-----------------------------------------------------------------------------
+Implemented: _strict_attack_mults (beliefs.py) uses the Node calc as an exact
+forward oracle over an SP grid to invert observed damage into a feasible
+attack-SP interval per (nature,item,ability) group, narrowing concrete
+archetypes and killing wrong natures/items; the 'any' catch-all KEEPS its old
+upward slack as a safety net. Config strict_attack_ev (default on). Round-trip
+tested against the real calc.
+FINDING that corrects the earlier hypothesis: the dominant reason damage drives
+the TRUE set toward zero is NOT archetype coarseness. Audit A/B (strict on vs
+off, same battles) is ~identical (true-set damage_atk kills 15 vs 14). The real
+causes, which hit the old path identically:
+  1. UN-MODELED conditional attacker boosts, above all Supreme Overlord
+     (Kingambit -- top of the depleted-species list): the calc doesn't know
+     alliesFainted, so it under-predicts the boosted hit and the observed
+     damage exceeds its max at every SP. The 'any' slack (~1.35x) absorbs some
+     of this (removing it made strict WORSE -- see the safety-net note in code).
+  2. Audit-only artifact: prep redacts our OWN defender's SP to 0, so the calc
+     assumes a frailer defender than reality. LIVE PLAY knows our own EVs, so
+     live behavior is better than --audit suggests. --audit understates strict.
+The band-narrowing benefit (sharper attack-SP posterior -> better determinized
+spreads and damage/speed features) is NOT visible in --audit's oracle-mass
+metric; measure it with benchmark.py play (Elo), not the belief audit.
+
+
+[DONE 2026-07-08] Factored / stitched depletion fallback -> raises the "in prior" ceiling
+------------------------------------------------------------------------------------------
+Implemented: on HARD depletion (no train set satisfies the hard reveals),
+_hard_depletion_fallback (beliefs.py) crosses two marginal buckets built from
+the same train sets -- (moveset,nature) x (item,ability) -- keeping only
+combinations consistent with the reveals, and appends the stitched particles
+(arch='any' -> free SP + slack, open to further evidence) instead of collapsing
+to the raw joint prior. Config factored_fallback (default on); backoff only, so
+the correlated joint particles stay the default. Audit A/B (200 test battles):
+  oracle set in prior   70.4% -> 73.4%  (+3.0)   <- the ceiling actually moved
+  oracle is top particle 30.3% -> 31.3%
+  oracle posterior mass  0.159 -> 0.165
+Only helps COMBINATION-novelty (components seen separately); a genuinely novel
+move still can't be stitched (degrades gracefully to raw prior -- tested).
+Natural next steps if more ceiling is wanted: finer factoring (4 buckets), or
+per-move marginals to synthesize unseen movesets (riskier -- can build illegal
+sets; keep it a depletion-only backoff).
+
+
+[OPEN] Model conditional attacker damage boosts (Supreme Overlord etc.)  <-- top damage lever
+--------------------------------------------------------------------------------------------
+Per the finding above, the biggest remaining damage_atk true-set killer is
+abilities the calc under-applies because it lacks battle context -- Supreme
+Overlord (alliesFainted), Analytic (moved last), Neuroforce, etc. Options:
+pass alliesFainted / move-order into the damage bridge request so @smogon/calc
+applies the boost exactly, OR widen the un-modeled-boost slack on the concrete
+archetypes (weakens EV inference -- less preferred). Fixing #1 is what would
+actually lift oracle posterior mass off the 0.155 floor on the damage axis.
+
+
+[DONE 2026-07-08] Objective (nature, SP-spread) prior from Pikalytics + nature as inferred dim
+----------------------------------------------------------------------------------------------
+Root finding: the Champions team sheets in our dataset REDACT stat training AND
+nature -- every parsed set is nature='serious', evs=[0]*6 (verified: showteam
+fields 5/6 empty across 20k mons). So the filter had NO prior for the
+(nature,spread) latent and inverted damage/speed at NEUTRAL nature, which
+matches ~0% of real sets (Kingambit 88% Adamant, Aerodactyl 95% Jolly, Delphox
+86% Timid). That neutral assumption was the dominant damage_atk (48%) + speed
+(23%) TRUE-set killer: a real Adamant/Timid mon exceeds anything neutral SP can
+explain, so strict inversion correctly empties the band and kills the true set.
+
+Implemented (closed-spread-set variant):
+  - build_spreads.py -> artifacts/spreads.json: per-species (nature%, 66-pt SP
+    spread%) marginals scraped from the Pikalytics JSON API in ONE request for
+    the whole format (/api/p/<date>/<key>/ returns all ~208 mons; key+date auto-
+    discovered so it stays re-runnable). Champions spreads are already in the
+    66-pt SP system, so they drop in with no unit conversion.
+  - beliefs.py: for a covered mon, each redacted usage set is expanded into the
+    top-K real (spread,nature) builds (concrete evs + real nature, arch=None ->
+    tested EXACTLY by the existing concrete-particle path in speed/damage) plus
+    one 'any' cushion (arch='any' -> slack, off-list coverage). Uncovered mons
+    keep the hand-built archetype + neutral-nature SP-interval fallback. Config
+    spreads_prior (default on), spreads_top_k, spreads_any_weight.
+Deliberately NO SP-interval inversion on covered mons: SP is fixed to the real
+Pikalytics values and NATURE becomes the inferred sub-dimension (which concrete
+build survives). Off-list spreads fall to the 'any' cushion.
+
+[OPEN] Bigger-coverage / less-sharp spread prior (interval over Pikalytics spreads)
+-----------------------------------------------------------------------------------
+The closed-set variant above tests only the enumerated Pikalytics spreads exactly
+and dumps everything else onto the 'any' cushion. Alternative to explore if the
+audit shows the cushion doing too much work (true set landing off-list): treat
+the Pikalytics spreads as SEEDS for a feasible SP-interval per (nature) group --
+i.e. re-introduce interval inversion but centered/weighted by the usage prior
+rather than the flat archetype grid. Trades sharpness for coverage of custom
+spreads not in the top-K. Measure: fraction of covered-mon true-set survival
+carried by 'any' vs a concrete build; if 'any' dominates, coverage is too tight.

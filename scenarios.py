@@ -316,13 +316,13 @@ def run_scenarios(searcher, cfg):
 # ---------------------------------------------------------------------------
 
 def mine(cfg, max_out=50):
-    import pickle
+    from data import iter_battles
     out = []
     for fn in cfg.dataset_files:
         fmt = fn[len("logs_"):-len(".json")]
-        with open(cfg.parsed_dir / f"{fmt}.pkl", "rb") as f:
-            recs = [r for r in pickle.load(f) if r["split"] == "test"]
-        for rec in recs:
+        for rec in iter_battles(cfg.parsed_dir / f"{fmt}.pkl"):
+            if rec["split"] != "test":
+                continue
             for turn in rec["turns"]:
                 if turn["states"] is None:
                     continue

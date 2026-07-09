@@ -38,6 +38,8 @@ function mon(q) {
                   spa: 8 * q.evs[3], spd: 8 * q.evs[4], spe: 8 * q.evs[5]} : undefined,
     boosts: q.boosts || undefined,
     status: q.status || undefined,
+    // Supreme Overlord reads this off the attacker; other abilities ignore it
+    alliesFainted: q.alliesFainted || undefined,
   });
 }
 
@@ -131,10 +133,14 @@ def request(attacker, defender, move, field=None, crit=False) -> dict:
     def side(d):
         boosts = {k: v for k, v in (d.get("boosts") or {}).items()
                   if k in ("atk", "def", "spa", "spd", "spe") and v}
-        return {"species": d["species"], "level": d.get("level", 50),
-                "item": d.get("item") or "", "ability": d.get("ability") or "",
-                "nature": d.get("nature") or "", "evs": d.get("evs"),
-                "boosts": boosts, "status": d.get("status") or ""}
+        s = {"species": d["species"], "level": d.get("level", 50),
+             "item": d.get("item") or "", "ability": d.get("ability") or "",
+             "nature": d.get("nature") or "", "evs": d.get("evs"),
+             "boosts": boosts, "status": d.get("status") or ""}
+        # only emit when set, so existing (no-ally) requests keep their cache key
+        if d.get("alliesFainted"):
+            s["alliesFainted"] = d["alliesFainted"]
+        return s
     return {"attacker": side(attacker), "defender": side(defender),
             "move": move, "field": field or {}, "crit": crit}
 
@@ -146,6 +152,7 @@ def damage_features(state, beliefs, bridge) -> dict:
              "screens": [c for c in ("reflect", "lightscreen", "auroraveil")
                          if state["opp"]["conditions"][c]]}
     keys, reqs = [], []
+    my_fainted = sum(t["fainted"] for t in state["my"]["team"])   # Supreme Overlord
     for m in state["my"]["team"]:
         if m["fainted"]:
             continue
@@ -155,7 +162,8 @@ def damage_features(state, beliefs, bridge) -> dict:
                "ability": s["ability"], "nature": s["nature"], "evs": s["evs"],
                "boosts": {k: v for k, v in m["boosts"].items()
                           if k in ("atk", "def", "spa", "spd", "spe") and v},
-               "status": m["status"] if m["status"] == "brn" else ""}
+               "status": m["status"] if m["status"] == "brn" else "",
+               "alliesFainted": my_fainted}
         for o in state["opp"]["team"]:
             if o["fainted"]:
                 continue

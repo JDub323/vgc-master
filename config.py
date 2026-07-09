@@ -68,6 +68,41 @@ class Config:
     # base stats + nature. This constant is only the fallback multiplier when
     # the species/move is missing from dex.json:
     investment_slack: float = 1.35
+    # phase-3.1 strict SP inversion. Damage WE take -> feasible attack-SP
+    # interval per (nature,item,ability) hypothesis, using the Node calc as an
+    # exact forward oracle over an SP grid; particles are killed/narrowed by
+    # attack EVs/nature WITHOUT the coarse-archetype over-kill (an archetype
+    # whose fixed spread misses the observed damage no longer dies -- SP is a
+    # free latent constrained to an interval). Speed does the same via the
+    # move-order inequality (pure-Python calc_stat, no bridge). Defensive-EV
+    # inference deliberately stays on the old one-sided slack (see
+    # investigations.txt). Set either False to recover pre-3.1 (archetype
+    # binary) behavior for an A/B against beliefs.py --audit.
+    strict_attack_ev: bool = True
+    strict_speed_ev: bool = True
+    strict_sp_step: int = 2      # attack-SP grid step (SP) for the calc oracle
+    # Objective (nature, SP-spread) prior from Pikalytics (artifacts/spreads.json,
+    # built by build_spreads.py). The dataset's sheets redact nature+SP (every
+    # set is 'serious'/0-EV), so the filter had no prior for that latent and
+    # inverted at NEUTRAL nature -- matching ~0% of real sets and killing the
+    # true set on any +nature mon. When on and the species is covered, each
+    # redacted usage set is expanded into the top-K real (spread,nature) builds
+    # (concrete evs + real nature, tested EXACTLY) plus one 'any' slack cushion
+    # for off-list spreads; SP is fixed to the Pikalytics values and NATURE is
+    # the inferred sub-dimension (which build survives the speed/damage facts).
+    # Uncovered species fall back to the hand-built archetype + neutral-nature
+    # SP-interval path. Off recovers pre-spreads behavior for an A/B.
+    spreads_prior: bool = True
+    spreads_top_k: int = 10        # (spread,nature) builds kept per covered set
+    spreads_any_weight: float = 0.08  # prior mass on the off-list 'any' cushion
+    # On HARD depletion (no train set satisfies the hard reveals), stitch new
+    # particles by crossing two independent marginal buckets -- (moves,nature)
+    # x (item,ability) -- filtered by the reveals, so a moveset seen with one
+    # item/ability can pair with an item/ability seen on a different set. Lets
+    # the filter represent novel-but-plausible COMBINATIONS the joint prior
+    # never held, raising the "oracle in prior" ceiling. Backoff only (the
+    # joint particles stay the default); False = old raw-prior fallback.
+    factored_fallback: bool = True
 
     # ---- model ----
     d_model: int = 256

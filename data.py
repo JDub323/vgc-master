@@ -422,6 +422,10 @@ class LogParser:
                     "atk_boosts": lm["boosts"], "def_boosts": dict(mon.boosts),
                     "screens": [c for c in ("reflect", "lightscreen", "auroraveil")
                                 if dside.conditions[c]],
+                    # attacker's already-fainted teammates at hit time, for
+                    # Supreme Overlord (+10% atk & spa per fainted ally, cap 5) --
+                    # the calc applies it exactly when passed alliesFainted
+                    "allies_fainted": sum(m.fainted for m in self.sides[lm["side"]].mons),
                     "def_hp_before": before, "def_transformed": mon.transformed}))
         elif cmd == "-crit":
             if self.last_move:
@@ -476,7 +480,15 @@ class LogParser:
             side_id, _, mon = self._pos(parts[2])
             if len(parts) > 3 and ":" in parts[3]:
                 kind, _, name = parts[3].partition(":")
-                if kind in ("move", "item", "ability"):
+                # NB: "move:" on -activate names the EFFECT, not the mon's set --
+                # protect-likes all announce generic "move: Protect" when they
+                # block, and Poltergeist announces "move: Poltergeist" on the
+                # TARGET whose item it reveals. Treating those as move reveals
+                # invented a move the true set never had and killed every
+                # particle (soft depletion + a false hard constraint). The real
+                # move a mon used is already revealed by its |move| line, so we
+                # only take item/ability reveals here.
+                if kind in ("item", "ability"):
                     self._reveal(side_id, mon, kind, name.strip())
         elif cmd == "-singleturn":
             # announced on SUCCESS of protect-likes / Wide / Quick Guard —
@@ -549,6 +561,22 @@ def split_of(match_id, cfg=CFG):
     return "train"
 
 
+def iter_battles(*paths):
+    """Yield parsed records one at a time from streamed-pickle files (parse
+    writes one pickle per record). Never holds a whole file in memory, so
+    readers scale to the 1.15GB bo3 pickle without the OOM that
+    pickle.load(whole_list) caused. Tolerates a truncated tail (a parse killed
+    mid-file) by stopping at the last complete record."""
+    import pickle
+    for path in paths:
+        with open(path, "rb") as f:
+            while True:
+                try:
+                    yield pickle.load(f)
+                except EOFError:
+                    break
+
+
 def parse(cfg=CFG):
     """Raw logs -> parsed battle pickles + vocab.json + usage_stats.json."""
     cfg.parsed_dir.mkdir(parents=True, exist_ok=True)
@@ -560,36 +588,42 @@ def parse(cfg=CFG):
         fmt = fn[len("logs_"):-len(".json")]
         with open(cfg.data_dir / fn, encoding="utf-8") as f:
             logs = json.load(f)
-        battles = []
-        for tag, (ts, log) in logs.items():
-            parser = LogParser(tag, ts, log, fmt)
-            try:
-                rec = parser.parse()
-            except Exception:
-                rec = None
-            if rec is None:
-                n_bad += 1
-                continue
-            rec["split"] = split_of(rec["match_id"], cfg)
-            battles.append(rec)
-            n_ok += 1
-            vocab_names["species"].update(parser.seen_species)
-            for team in rec["teams"].values():
-                for s in team:
-                    vocab_names["species"].add(sid(s["species"]))
-                    vocab_names["item"].add(s["item"])
-                    vocab_names["ability"].add(s["ability"])
-                    vocab_names["nature"].add(s["nature"])
-                    vocab_names["move"].update(s["moves"])
-            if rec["split"] == "train":
+        # Stream one pickle per record straight to disk (read back the same way
+        # via iter_battles). The whole-format list never lives in memory, so
+        # peak RAM is one record + the shrinking raw-log dict, not the multi-GB
+        # bo3 battle list that used to OOM here. vocab/usage accumulators are
+        # bounded by metagame diversity, not battle count, so they stay small.
+        n_fmt = 0
+        with open(cfg.parsed_dir / f"{fmt}.pkl", "wb") as out:
+            for tag in list(logs):
+                ts, log = logs.pop(tag)   # free each raw log as we parse it
+                parser = LogParser(tag, ts, log, fmt)
+                try:
+                    rec = parser.parse()
+                except Exception:
+                    rec = None
+                if rec is None:
+                    n_bad += 1
+                    continue
+                rec["split"] = split_of(rec["match_id"], cfg)
+                pickle.dump(rec, out)
+                n_ok += 1
+                n_fmt += 1
+                vocab_names["species"].update(parser.seen_species)
                 for team in rec["teams"].values():
                     for s in team:
-                        usage[sid(s["species"])][
-                            (tuple(sorted(s["moves"])), s["item"],
-                             s["ability"], s["nature"])] += 1
-        with open(cfg.parsed_dir / f"{fmt}.pkl", "wb") as f:
-            pickle.dump(battles, f)
-        print(f"{fmt}: {len(battles)} battles parsed")
+                        vocab_names["species"].add(sid(s["species"]))
+                        vocab_names["item"].add(s["item"])
+                        vocab_names["ability"].add(s["ability"])
+                        vocab_names["nature"].add(s["nature"])
+                        vocab_names["move"].update(s["moves"])
+                if rec["split"] == "train":
+                    for team in rec["teams"].values():
+                        for s in team:
+                            usage[sid(s["species"])][
+                                (tuple(sorted(s["moves"])), s["item"],
+                                 s["ability"], s["nature"])] += 1
+        print(f"{fmt}: {n_fmt} battles parsed")
     print(f"total parsed={n_ok} skipped={n_bad}")
 
     with open(cfg.artifacts_dir / "vocab_names.json", "w") as f:
@@ -636,11 +670,14 @@ def prep(cfg=CFG, resume=False):
 
     files = [cfg.parsed_dir / f"{fn[len('logs_'):-len('.json')]}.pkl"
              for fn in cfg.dataset_files]
-    all_battles = []
-    for pf in files:
-        with open(pf, "rb") as f:
-            all_battles += pickle.load(f)
-    max_ts = max(b["ts"] for b in all_battles)
+    # pass 1: recency weighting needs the global max timestamp, and the
+    # progress line needs a total. Streaming keeps memory flat (one record at a
+    # time) at the cost of unpickling twice -- cheap next to the belief+damage
+    # work in pass 2, and the only way to avoid holding every battle in RAM.
+    max_ts = n_battles = 0
+    for rec in iter_battles(*files):
+        max_ts = max(max_ts, rec["ts"])
+        n_battles += 1
 
     bufs = {s: defaultdict(list) for s in ("train", "val", "test")}
     shard_n = {s: 0 for s in bufs}
@@ -681,7 +718,7 @@ def prep(cfg=CFG, resume=False):
         return sum(1 for p in ("p1", "p2") for turn in rec["turns"]
                    if turn["states"] is not None and turn["actions"][p] is not None)
 
-    for bi, rec in enumerate(all_battles):
+    for bi, rec in enumerate(iter_battles(*files)):
         split = rec["split"]
         if resume:
             # Skip battles already fully captured in on-disk shards for their split.
@@ -716,7 +753,7 @@ def prep(cfg=CFG, resume=False):
         for s in bufs:
             flush(s)
         if (bi + 1) % 1000 == 0:
-            print(f"{bi + 1}/{len(all_battles)} battles prepped")
+            print(f"{bi + 1}/{n_battles} battles prepped")
     for s in bufs:
         flush(s, force=True)
     if bridge:
