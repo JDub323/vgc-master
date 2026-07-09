@@ -47,9 +47,13 @@ import numpy as np
 
 from config import CFG
 
-LAYOUT_VERSION = 2   # bump when the token layout changes; vocab.json carries it
+LAYOUT_VERSION = 3   # bump when the token layout changes; vocab.json carries it
                      # so archived benchmark bundles rebuild the layout they
-                     # were trained on
+                     # were trained on. v3: belief-block spread token is the
+                     # inferred NATURE (nature:*) instead of the archetype
+                     # (ARCH_*), which collapsed to a constant 'any' once the
+                     # Pikalytics spreads prior fixed SP and made nature the
+                     # inferred latent.
 
 WEATHERS = ["", "sandstorm", "raindance", "sunnyday", "snowscape", "hail",
             "primordialsea", "desolateland", "deltastream"]
@@ -64,7 +68,7 @@ N_MONS = 6
 
 class PositionTokenizer:
     def __init__(self, vocab: dict, lists: dict, cfg=CFG, layout=LAYOUT_VERSION):
-        assert layout in (1, 2), layout
+        assert layout in (1, 2, 3), layout
         self.vocab = vocab
         self.cfg = cfg
         self.layout = layout
@@ -240,7 +244,14 @@ class PositionTokenizer:
                         f"SPD_{min(cfg.n_speed_buckets - 1, int(b['spe_lo'] / cfg.speed_bucket_width))}",
                         f"SPD_{min(cfg.n_speed_buckets - 1, int(b['spe_hi'] / cfg.speed_bucket_width))}",
                         f"BULK_{min(cfg.n_bulk_buckets - 1, int(b['bulk'] / cfg.bulk_bucket_width))}"]
-                if self.layout >= 2:
+                if self.layout >= 3:
+                    # layout 3: the spread belief is carried by the inferred
+                    # NATURE (the spreads prior fixes SP and infers nature), not
+                    # the now-constant 'any' archetype. Physical shape still
+                    # rides the SPD/BULK tokens above.
+                    out += [f"nature:{b.get('nature') or 'serious'}",
+                            f"PROB_{min(cfg.n_prob_buckets - 1, int(b.get('p_nature', 0.0) * cfg.n_prob_buckets))}"]
+                elif self.layout == 2:
                     out += [f"ARCH_{b.get('arch') or 'any'}",
                             f"PROB_{min(cfg.n_prob_buckets - 1, int(b.get('p_arch', 0.0) * cfg.n_prob_buckets))}"]
 

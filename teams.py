@@ -722,13 +722,11 @@ def mine(n, cfg=CFG):
     """The n most common real team sheets among higher-rated dataset games,
     printed as export text — the ground truth to swap in for any replica the
     validator rejects (dataset teams are legal by construction)."""
-    import pickle
+    from data import iter_battles
     counts, samples = Counter(), {}
     for fn in cfg.dataset_files:
         fmt = fn[len("logs_"):-len(".json")]
-        with open(cfg.parsed_dir / f"{fmt}.pkl", "rb") as f:
-            recs = pickle.load(f)
-        for rec in recs:
+        for rec in iter_battles(cfg.parsed_dir / f"{fmt}.pkl"):
             for p, team in rec["teams"].items():
                 r = rec["ratings"].get(p)
                 if r is not None and r < 1200:

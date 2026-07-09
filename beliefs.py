@@ -38,6 +38,7 @@ import random
 import re
 import sys
 import time
+from collections import Counter
 
 from config import CFG
 from damage import request
@@ -62,6 +63,20 @@ def load_dex(cfg=CFG):
     if p not in _DEX_CACHE:
         _DEX_CACHE[p] = json.loads(p.read_text()) if p.exists() else None
     return _DEX_CACHE[p]
+
+
+_SPREADS_CACHE = {}
+
+
+def load_spreads(cfg=CFG):
+    """artifacts/spreads.json (built by build_spreads.py): per-species objective
+    (nature%, 66-pt SP spread%) marginals from Pikalytics. None when absent, so
+    the filter cleanly falls back to the hand-built archetype prior."""
+    p = cfg.artifacts_dir / "spreads.json"
+    if p not in _SPREADS_CACHE:
+        _SPREADS_CACHE[p] = (json.loads(p.read_text()).get("mons")
+                             if p.exists() else None)
+    return _SPREADS_CACHE[p]
 
 
 MAX_SP = 32   # Champions stat-point cap per stat (66 total, IVs forced to 31)
@@ -144,6 +159,7 @@ class OpponentBelief:
     def __init__(self, opp_species, usage, cfg=CFG, bridge=None, my_team=None):
         self.cfg, self.bridge = cfg, bridge
         self.dex = load_dex(cfg)
+        self.spreads = load_spreads(cfg) if getattr(cfg, "spreads_prior", True) else None
         self.species = opp_species          # sids, team-preview order
         self.my_team = my_team or []
         self.particles = []                 # per mon: list of set dicts
@@ -158,7 +174,9 @@ class OpponentBelief:
             if not sets:
                 sets = [{"moves": (), "item": "", "ability": "", "nature": "serious",
                      "evs": None, "arch": None, "n": 1}]
-            if getattr(cfg, "spread_archetypes", True):
+            if self.spreads and sp in self.spreads:
+                sets = self._expand_spreads(sp, sets, cfg)
+            elif getattr(cfg, "spread_archetypes", True):
                 sets = self._expand_archetypes(sp, sets, cfg)
             else:
                 sets = sets[:cfg.n_particles]
@@ -174,6 +192,103 @@ class OpponentBelief:
         # hard = even the prior is inconsistent with the hard reveals
         self.soft_depletions = [0] * len(opp_species)
         self.hard_depletions = [0] * len(opp_species)
+        # --- diagnostics (behavior-preserving; zero cost when unused) --------
+        # cause-tagged depletion tallies, so `--audit` can say WHICH evidence
+        # channel (reveal_move/item/ability vs speed vs damage) is doing the
+        # killing -- i.e. whether the lever is prior coverage or archetype
+        # sharpness. Populated only inside _apply_list.
+        self.soft_by_cause = Counter()
+        self.hard_by_cause = Counter()
+        # oracle-mass attribution: set self.oracle_keys = {k: _set_key(true_set)}
+        # (audit only) to have _apply_list record what collapses the TRUE set's
+        # mass. A hard reveal killing the oracle set is a BUG signal (the true
+        # set contains every revealed move); speed/damage loss is the
+        # archetype-sharpness lever. None => no tracking, no overhead.
+        self.oracle_keys = None
+        self.oracle_keyfn = _set_key            # audit overrides to _id_key (nature-free)
+        self.oracle_loss_by_cause = Counter()   # summed relative mass lost
+        self.oracle_kills_by_cause = Counter()  # oracle set driven to ~0
+        # --- phase-3.1 strict SP inversion ----------------------------------
+        # Per particle, a feasible stat-point INTERVAL for the stats we infer
+        # exactly (attack + speed). Evidence narrows [lo,hi]; a particle dies
+        # only when its interval empties, so a coarse archetype spread that
+        # misses the observed value is narrowed, not annihilated. Defensive
+        # stats stay on the old slack, so no interval for def/spd/hp here.
+        self.strict_spe = getattr(cfg, "strict_speed_ev", True)
+        self.strict_atk = getattr(cfg, "strict_attack_ev", True) and bridge is not None
+        self.sp_bounds = [[{"atk": [0, MAX_SP], "spa": [0, MAX_SP],
+                            "spe": [0, MAX_SP]} for _ in ps]
+                          for ps in self.particles]
+        # --- factored depletion fallback -----------------------------------
+        # two independent marginal buckets per mon, from the SAME train sets:
+        # bucket 1 = (moveset, nature), bucket 2 = (item, ability). On hard
+        # depletion we cross them (filtered by the hard reveals) to synthesize
+        # combinations the joint prior never contained. Backoff only.
+        self.factored_fallback = getattr(cfg, "factored_fallback", True)
+        self._bucket_mn, self._bucket_ia = [], []
+        for sp in opp_species:
+            b_mn, b_ia = Counter(), Counter()
+            for row in usage.get(sp, []):
+                c, mv, it, ab, na, *_ = row
+                b_mn[(tuple(mv), na)] += c
+                b_ia[(it, ab)] += c
+            self._bucket_mn.append(sorted(b_mn.items(), key=lambda kv: -kv[1]))
+            self._bucket_ia.append(sorted(b_ia.items(), key=lambda kv: -kv[1]))
+
+    def _free_sp(self, p):
+        """True when this particle's stat points are UNKNOWN (redacted) and so
+        eligible for interval inversion: every archetype particle, incl. the
+        'any' catch-all. Authored / determinized sets carry a concrete, known
+        spread (arch is None and evs is set) and are tested at their exact
+        stats instead, so search determinizations and scenario sets are
+        unaffected."""
+        return p.get("arch") is not None or p.get("evs") is None
+
+    def _spread_nature_combos(self, sp, k):
+        """Top-k concrete (weight, ev-spread, nature) builds for a covered mon,
+        from its Pikalytics marginals. Nature and spread are independent
+        marginals on the page, so we cross them (weight = spread% x nature%) and
+        down-weight combos where the nature LOWERS a heavily-invested stat (a
+        32-SpA Adamant build is near-nonsense); the tail is culled by the top-k
+        cut anyway. This is the objective replacement for the flat archetype
+        grid + neutral-nature assumption."""
+        data = self.spreads[sp]
+        nats = data["natures"]
+        combos = []
+        for ev, spct in data["spreads"]:
+            for nat, npct in nats.items():
+                w = spct * npct
+                down = NATURES.get(nat, ("", ""))[1]
+                if down and ev[STAT_KEYS.index(down)] >= 16:
+                    w *= 0.1
+                combos.append((w, ev, nat))
+        combos.sort(key=lambda x: -x[0])
+        return combos[:k]
+
+    def _expand_spreads(self, sp, sets, cfg):
+        """Covered-mon expansion: each redacted usage set -> the top-K real
+        (spread,nature) builds (concrete evs + real nature, arch=None so the
+        existing concrete-particle path tests them EXACTLY) plus one 'any' slack
+        cushion (arch='any') for spreads off the Pikalytics list. SP is fixed to
+        the real values; NATURE is the inferred latent (which build survives the
+        speed/damage facts). Authored/determinized sets (evs already set) pass
+        through untouched, exactly like _expand_archetypes."""
+        k = cfg.spreads_top_k
+        combos = self._spread_nature_combos(sp, k)
+        tot = sum(w for w, _, _ in combos) or 1.0
+        any_frac = cfg.spreads_any_weight
+        base = sets[:max(1, cfg.n_particles // (k + 1))]
+        out = []
+        for s in base:
+            if s["evs"] is not None:
+                out.append(s)
+                continue
+            for w, ev, nat in combos:
+                out.append({**s, "nature": nat, "evs": list(ev), "arch": None,
+                            "n": s["n"] * (1 - any_frac) * w / tot})
+            out.append({**s, "nature": "serious", "evs": None, "arch": "any",
+                        "n": s["n"] * any_frac})
+        return out
 
     def _expand_archetypes(self, sp, sets, cfg):
         """Each redacted-spread set -> one particle per archetype, nature-
@@ -198,14 +313,20 @@ class OpponentBelief:
             return None
         return self.dex["species"][species]["baseStats"][stat]
 
-    def _particle_speed(self, k, p, ctx=None, sp=None):
-        """sp=None: the particle's own spread if it has one, else 0 (the
-        conservative floor for 'any'-spread particles)."""
+    def _particle_speed(self, k, p, ctx=None, sp=None, j=None):
+        """sp=None picks the speed SP to evaluate at: for a free-SP particle
+        under strict speed the MIDPOINT of its narrowed feasible interval
+        (j = particle index), else the particle's own spread if concrete, else
+        0 (the conservative floor for 'any'-spread particles)."""
         base = self._base(self.species[k], "spe")
         if base is None:
             return None
         if sp is None:
-            sp = p["evs"][5] if p.get("evs") else 0
+            if self.strict_spe and j is not None and self._free_sp(p):
+                lo, hi = self.sp_bounds[k][j]["spe"]
+                sp = (lo + hi) // 2
+            else:
+                sp = p["evs"][5] if p.get("evs") else 0
         spe = calc_stat(base, "spe", p["nature"], sp)
         if p["item"] == "choicescarf" and not self.constraints[k]["consumed"]:
             spe = int(spe * 1.5)
@@ -233,29 +354,92 @@ class OpponentBelief:
         return spe
 
     # -- constraint machinery ---------------------------------------------
-    def _apply(self, k, keep):
+    def _apply(self, k, keep, cause="?"):
         """keep(particle) -> bool | float multiplier. A pure-Python pass over
         <= n_particles (200) floats — microseconds. The filter's real cost is
         calc_batch in _damage_evidence; `--audit` prints both to confirm."""
-        self._apply_list(k, [float(keep(p)) for p in self.particles[k]])
+        self._apply_list(k, [float(keep(p)) for p in self.particles[k]], cause)
 
-    def _apply_list(self, k, mults):
+    def _oracle_mass(self, k):
+        """Total weight on particles sharing the true set's identity (audit
+        only; self.oracle_keys must be set). Grouped by _set_key because
+        archetype expansion splits one set across several particles."""
+        key = self.oracle_keys[k]
+        return sum(w for w, p in zip(self.weights[k], self.particles[k])
+                   if self.oracle_keyfn(p) == key)
+
+    def _apply_list(self, k, mults, cause="?"):
+        before = self._oracle_mass(k) if self.oracle_keys else None
         new = [wi * m for wi, m in zip(self.weights[k], mults)]
         if sum(new) <= 0:
             self.soft_depletions[k] += 1
+            self.soft_by_cause[cause] += 1
             new = [pr * self._hard_ok(k, p) for pr, p in
                    zip(self.priors[k], self.particles[k])]
         if sum(new) <= 0:
             self.hard_depletions[k] += 1
-            new = list(self.priors[k])
+            self.hard_by_cause[cause] += 1
+            new = self._hard_depletion_fallback(k)
         total = sum(new)
         self.weights[k] = [x / total for x in new]
+        if before is not None and before > 1e-9:
+            after = self._oracle_mass(k)
+            if after < before * 0.5:
+                self.oracle_loss_by_cause[cause] += (before - after) / before
+            if after <= 1e-9:
+                self.oracle_kills_by_cause[cause] += 1
 
     def _hard_ok(self, k, p):
         c = self.constraints[k]
         return float(c["moves"] <= set(p["moves"])
                      and (c["item"] is None or p["item"] == c["item"])
                      and (c["ability"] is None or p["ability"] == c["ability"]))
+
+    def _hard_depletion_fallback(self, k):
+        """No train set satisfies the hard reveals. Instead of collapsing to
+        the raw joint prior (which still cannot contain a never-seen
+        COMBINATION), stitch particles by crossing the two marginal buckets --
+        (moveset,nature) x (item,ability) -- keeping only combinations
+        consistent with the reveals, so a moveset seen with one item/ability
+        can pair with an item/ability seen on a different set. The stitched
+        particles are APPENDED to this mon's arrays (arch='any' -> free SP +
+        the slack safety net, and open to further evidence). Returns the new
+        weight vector over the extended list; falls back to the raw prior when
+        factoring is off or yields nothing (e.g. a genuinely novel move)."""
+        if not self.factored_fallback:
+            return list(self.priors[k])
+        c = self.constraints[k]
+        mn = [(v, n) for v, n in self._bucket_mn[k] if c["moves"] <= set(v[0])]
+        ia = [(v, n) for v, n in self._bucket_ia[k]
+              if (c["item"] is None or v[0] == c["item"])
+              and (c["ability"] is None or v[1] == c["ability"])]
+        if not mn or not ia:
+            return list(self.priors[k])
+        existing = {_set_key(p) for p in self.particles[k]}
+        cand = []
+        for (moves, nature), n1 in mn:
+            for (item, ability), n2 in ia:
+                key = (tuple(sorted(moves)), item, ability, nature)
+                if key in existing:
+                    continue
+                existing.add(key)
+                cand.append((n1 * n2, {"moves": moves, "item": item,
+                                       "ability": ability, "nature": nature,
+                                       "evs": None, "arch": "any"}))
+        if not cand:
+            return list(self.priors[k])
+        cand.sort(key=lambda wp: -wp[0])
+        cand = cand[:self.cfg.n_particles]
+        tot = sum(w for w, _ in cand)
+        new = [0.0] * len(self.particles[k])   # every old particle is inconsistent
+        for w, part in cand:
+            pr = w / tot
+            self.particles[k].append(part)
+            self.priors[k].append(pr)
+            self.sp_bounds[k].append({"atk": [0, MAX_SP], "spa": [0, MAX_SP],
+                                      "spe": [0, MAX_SP]})
+            new.append(pr)
+        return new
 
     def _resample_check(self, k):
         alive = sum(1 for w in self.weights[k] if w > 1e-9)
@@ -274,13 +458,13 @@ class OpponentBelief:
                 c = self.constraints[k]
                 if kind == "move":
                     c["moves"].add(name)
-                    self._apply(k, lambda p: name in p["moves"])
+                    self._apply(k, lambda p: name in p["moves"], "reveal_move")
                 elif kind == "item":
                     c["item"] = name
-                    self._apply(k, lambda p: p["item"] == name)
+                    self._apply(k, lambda p: p["item"] == name, "reveal_item")
                 elif kind == "ability":
                     c["ability"] = name
-                    self._apply(k, lambda p: p["ability"] == name)
+                    self._apply(k, lambda p: p["ability"] == name, "reveal_ability")
             elif ev[0] == "consumed" and ev[1] == opp:
                 self.constraints[ev[2]]["consumed"] = True
             elif ev[0] == "mega" and ev[1] == opp:
@@ -316,6 +500,12 @@ class OpponentBelief:
                 # spread) and one-sided only for the 'any' catch-all.
                 mine_hi = self._my_speed(m_idx, m_ctx, sp=MAX_SP)
 
+                if self.strict_spe:
+                    self._apply_list(
+                        k, self._strict_speed_mults(k, o_ctx, mine, mine_hi, first),
+                        "speed")
+                    continue
+
                 def ok(p, mine=mine, mine_hi=mine_hi, first=first, k=k, ctx=o_ctx):
                     theirs = self._particle_speed(k, p, ctx)
                     if theirs is None:
@@ -326,7 +516,48 @@ class OpponentBelief:
                         return theirs >= mine
                     return mine_hi >= theirs
 
-                self._apply(k, ok)
+                self._apply(k, ok, "speed")
+
+    def _strict_speed_mults(self, k, ctx, mine, mine_hi, first):
+        """Interval inversion of one same-priority move-order fact. `first` =
+        the opponent's mon acted before my mon (already flipped for Trick
+        Room), so their on-field speed >= mine; else <= mine_hi. For each
+        free-SP particle we find the speed-SP sub-range consistent with the
+        inequality and INTERSECT it into the particle's feasible band, killing
+        (multiplier 0) only when the band empties -- i.e. only when no speed
+        investment at all could reproduce the observed order. Known-SP
+        particles keep the exact single-point test. Our side stays one-sided
+        (mine = our slowest, mine_hi = our fastest) because our SP is hidden in
+        prep replays. The context (Choice Scarf, Tailwind, paralysis, boosts)
+        is baked into _particle_speed, so a mistracked modifier here would show
+        up as a false kill -- exactly what the speed-context tests check."""
+        mults = []
+        for j, p in enumerate(self.particles[k]):
+            theirs0 = self._particle_speed(k, p, ctx, sp=0)
+            if theirs0 is None:                 # no dex speed -> no evidence
+                mults.append(1.0)
+                continue
+            if not self._free_sp(p):            # concrete spread: exact test
+                theirs = self._particle_speed(k, p, ctx)
+                mults.append(float(theirs >= mine if first else mine_hi >= theirs))
+                continue
+            band = self.sp_bounds[k][j]["spe"]
+            if first:                           # need theirs(sp) >= mine
+                new_lo = next((sp for sp in range(MAX_SP + 1)
+                               if self._particle_speed(k, p, ctx, sp=sp) >= mine), None)
+                if new_lo is None:              # too slow even fully invested
+                    mults.append(0.0)
+                    continue
+                band[0] = max(band[0], new_lo)
+            else:                               # need theirs(sp) <= mine_hi
+                new_hi = next((sp for sp in range(MAX_SP, -1, -1)
+                               if self._particle_speed(k, p, ctx, sp=sp) <= mine_hi), None)
+                if new_hi is None:              # too fast even at 0 SP
+                    mults.append(0.0)
+                    continue
+                band[1] = min(band[1], new_hi)
+            mults.append(1.0 if band[0] <= band[1] else 0.0)
+        return mults
 
     def _damage_evidence(self, ev, viewer, opp):
         _, atk_side, atk_idx, move, def_side, def_idx, frac, ctx = ev
@@ -353,6 +584,11 @@ class OpponentBelief:
             dfd = {"species": _sid(d["species"]), "level": d["level"],
                    "item": d["item"], "ability": d["ability"], "nature": d["nature"],
                    "evs": d["evs"], "boosts": ctx["def_boosts"]}
+            if self.strict_atk:                   # invert to feasible attack SP
+                self._apply_list(
+                    k, self._strict_attack_mults(k, move, dfd, field, ctx,
+                                                 frac, tol, truncated), "damage_atk")
+                return
             reqs = [request(self._as_attacker(k, p, ctx), dfd, move, field)
                     for p in self.particles[k]]
             slacks = [self._atk_slack(k, p, move) for p in self.particles[k]]
@@ -382,7 +618,108 @@ class OpponentBelief:
                 return float(hi >= frac - tol)
             return float(lo - tol <= frac <= hi + tol)
 
-        self._apply_list(k, [ok(r, s) for r, s in zip(res, slacks)])
+        self._apply_list(k, [ok(r, s) for r, s in zip(res, slacks)],
+                         "damage_atk" if their_attack else "damage_def")
+
+    def _strict_attack_mults(self, k, move, dfd, field, ctx, frac, tol, truncated):
+        """Damage WE took -> per-particle survival multiplier by inverting the
+        calc for the opponent's attack SP. Free-SP particles are grouped by
+        attacker hypothesis (nature, item, ability); each group is calc'd once
+        across an SP grid (the calc is the exact forward oracle, so all its
+        truncation is respected), inverted to the feasible attack-SP interval
+        consistent with the observed fraction, and that interval is intersected
+        into every member's band. A particle dies only when its band empties --
+        i.e. when no attack investment at all, for its nature/item/ability,
+        could deal the observed damage -- which is the strict kill on attack
+        EVs/nature we want, without the coarse-archetype over-kill. Known-SP
+        particles keep the exact single-point test. Defensive inference is NOT
+        done here (that branch stays on the old slack)."""
+        cat = (self.dex or {}).get("moves", {}).get(move, {}).get("category")
+        key = "atk" if cat == "Physical" else "spa" if cat == "Special" else None
+        particles = self.particles[k]
+        mults = [1.0] * len(particles)
+        if key is None:                       # status / unknown move: no info
+            return mults
+        consumed = self.constraints[k]["consumed"]
+        grid = list(range(0, MAX_SP + 1, max(1, self.cfg.strict_sp_step)))
+        if grid[-1] != MAX_SP:
+            grid.append(MAX_SP)
+
+        # concrete redacted-spread archetypes: strict interval inversion.
+        groups = {}
+        for j, p in enumerate(particles):
+            if p.get("arch") not in (None, "any"):
+                gkey = (p["nature"], None if consumed else p["item"], p["ability"])
+                groups.setdefault(gkey, []).append(j)
+        if groups:
+            reqs, tags = [], []
+            for gkey, js in groups.items():
+                p0 = particles[js[0]]
+                for sp in grid:
+                    reqs.append(request(self._atk_hypo(k, p0, ctx, key, sp),
+                                        dfd, move, field))
+                    tags.append((gkey, sp))
+            res = self.bridge.calc_batch(reqs)
+            per_group = {}
+            for (gkey, sp), r in zip(tags, res):
+                per_group.setdefault(gkey, {})[sp] = r
+            for gkey, js in groups.items():
+                lo, hi, valid = _feasible_sp_range(per_group[gkey], frac, tol, truncated)
+                if not valid:                 # calc gave nothing -> no evidence
+                    continue
+                for j in js:
+                    if lo is None:            # no SP explains it -> kill
+                        mults[j] = 0.0
+                        continue
+                    band = self.sp_bounds[k][j][key]
+                    band[0], band[1] = max(band[0], lo), min(band[1], hi)
+                    mults[j] = 1.0 if band[0] <= band[1] else 0.0
+
+        # the 'any' catch-all + authored/determinized sets keep the OLD test.
+        # 'any' KEEPS its upward investment slack (_atk_slack), which absorbs
+        # un-modeled attacker damage boosts -- Supreme Overlord, Analytic, etc.
+        # -- so a boosted hit that exceeds the calc's max at every SP still
+        # can't drive the true SET to zero (its 'any' particle survives). That
+        # cushion is exactly why removing it made strict WORSE than the old path
+        # in the audit. Authored sets get slack 1.0 (exact), as before.
+        other = [(j, p) for j, p in enumerate(particles)
+                 if p.get("arch") in (None, "any")]
+        if other:
+            # only the attack stat affects OUTGOING damage, so a concrete build
+            # (evs set -- the Pikalytics-spread particles) is calc'd with all SP
+            # isolated onto `key` at its own attack SP. Builds sharing
+            # (nature,item,ability,attack-SP) then collapse to ONE cached calc
+            # (covered mons run ~180 concrete builds, most maxing attack), which
+            # is the covered-path speedup. The 'any' cushion (evs None) keeps the
+            # slack request unchanged.
+            reqs = []
+            for _, p in other:
+                if p.get("evs"):
+                    atk = self._atk_hypo(k, p, ctx, key, p["evs"][STAT_KEYS.index(key)])
+                else:
+                    atk = self._as_attacker(k, p, ctx)
+                reqs.append(request(atk, dfd, move, field))
+            res = self.bridge.calc_batch(reqs)
+            for (j, p), r in zip(other, res):
+                if r is None:
+                    continue
+                hi = r[1] * self._atk_slack(k, p, move)   # slack 1.0 for concrete
+                mults[j] = (float(hi >= frac - tol) if truncated
+                            else float(r[0] - tol <= frac <= hi + tol))
+        return mults
+
+    def _atk_hypo(self, k, p, ctx, stat_key, sp):
+        """Attacker hypothesis with all stat points isolated onto the attack
+        stat being inverted (the attacker's other stats never affect its
+        outgoing damage), so the calc's damage is a clean monotone function of
+        `sp` and the inversion is exact."""
+        evs = [0] * 6
+        evs[STAT_KEYS.index(stat_key)] = sp
+        return {"species": self._species_cur(k), "level": 50,
+                "item": None if self.constraints[k]["consumed"] else p["item"],
+                "ability": p["ability"], "nature": p["nature"], "evs": evs,
+                "boosts": ctx["atk_boosts"], "status": "brn" if ctx["burn"] else "",
+                "alliesFainted": ctx.get("allies_fainted")}
 
     def _atk_slack(self, k, p, move):
         """Largest multiplier hidden attack SP (0..MAX_SP, redacted on team
@@ -419,7 +756,8 @@ class OpponentBelief:
                 "item": None if self.constraints[k]["consumed"] else p["item"],
                 "ability": p["ability"], "nature": p["nature"],
                 "evs": p.get("evs"),
-                "boosts": ctx["atk_boosts"], "status": "brn" if ctx["burn"] else ""}
+                "boosts": ctx["atk_boosts"], "status": "brn" if ctx["burn"] else "",
+                "alliesFainted": ctx.get("allies_fainted")}
 
     def _as_defender(self, k, p, ctx):
         return {"species": self._species_cur(k), "level": 50,
@@ -450,7 +788,8 @@ class OpponentBelief:
         for k, sp in enumerate(self.species):
             ws, ps = self.weights[k], self.particles[k]
             item, p_item = self.item_posterior(k)[0]
-            speeds = [(self._particle_speed(k, p) or 0, w) for p, w in zip(ps, ws)]
+            speeds = [(self._particle_speed(k, p, j=j) or 0, w)
+                      for j, (p, w) in enumerate(zip(ps, ws))]
             speeds.sort()
             lo = _quantile(speeds, 0.05)
             hi = _quantile(speeds, 0.95)
@@ -464,9 +803,11 @@ class OpponentBelief:
                     sd = calc_stat(sd_b, "spd", p["nature"], evs[4])
                     bulk += w * hp * (df + sd) / 2
             arch, p_arch = self.arch_posterior(k)[0]
+            nat, p_nat = self.nature_posterior(k)[0]
             out[k] = {"item": item, "p_item": p_item,
                       "spe_lo": lo, "spe_hi": hi, "bulk": bulk,
-                      "arch": arch, "p_arch": p_arch}
+                      "arch": arch, "p_arch": p_arch,
+                      "nature": nat, "p_nature": p_nat}
         return out
 
     def arch_posterior(self, k):
@@ -476,6 +817,16 @@ class OpponentBelief:
         acc = {}
         for w, p in zip(self.weights[k], self.particles[k]):
             acc[p.get("arch") or "any"] = acc.get(p.get("arch") or "any", 0.0) + w
+        return sorted(acc.items(), key=lambda kv: -kv[1])
+
+    def nature_posterior(self, k):
+        """[(nature, prob)] sorted by prob. The inferred nature sub-dimension:
+        for a covered mon this is the real posterior (which Pikalytics build
+        survived the speed/damage facts); for an uncovered mon every particle is
+        the redacted 'serious', so it collapses to serious (honestly unknown)."""
+        acc = {}
+        for w, p in zip(self.weights[k], self.particles[k]):
+            acc[p["nature"]] = acc.get(p["nature"], 0.0) + w
         return sorted(acc.items(), key=lambda kv: -kv[1])
 
     def item_posterior(self, k):
@@ -491,13 +842,36 @@ class OpponentBelief:
         for _ in range(n):
             team = []
             for k, sp in enumerate(self.species):
-                p = rng.choices(self.particles[k], weights=self.weights[k])[0]
-                team.append({"species": sp, "moves": list(p["moves"]),
-                             "item": p["item"], "ability": p["ability"],
-                             "nature": p["nature"],
-                             **({"evs": list(p["evs"])} if p.get("evs") else {})})
+                j = rng.choices(range(len(self.particles[k])),
+                                weights=self.weights[k])[0]
+                p = self.particles[k][j]
+                s = {"species": sp, "moves": list(p["moves"]),
+                     "item": p["item"], "ability": p["ability"],
+                     "nature": p["nature"]}
+                evs = self._sampled_evs(k, j, p)
+                if evs is not None:
+                    s["evs"] = evs
+                team.append(s)
             teams.append(team)
         return teams
+
+    def _sampled_evs(self, k, j, p):
+        """Concrete spread for one determinized sample. A free-SP particle's
+        inferred stats (attack + speed) are drawn from the midpoints of their
+        narrowed feasible bands so the sampled opponent is consistent with the
+        evidence; defensive stats come from the archetype. Non-free particles
+        pass their known spread through unchanged."""
+        base = list(p["evs"]) if p.get("evs") else None
+        if not self._free_sp(p) or not (self.strict_spe or self.strict_atk):
+            return base
+        evs = base if base is not None else [0] * 6
+        b = self.sp_bounds[k][j]
+        if self.strict_spe:
+            evs[5] = sum(b["spe"]) // 2
+        if self.strict_atk:                    # only the stat this set invests
+            att = _att_key(self.species[k], p["nature"], self.dex)
+            evs[STAT_KEYS.index(att)] = sum(b[att]) // 2
+        return evs
 
 
 def determinized(sets, cfg=CFG):
@@ -509,6 +883,31 @@ def determinized(sets, cfg=CFG):
                                    s["ability"], s["nature"], s.get("evs"))]
              for s in sets}
     return OpponentBelief([_sid(s["species"]) for s in sets], usage, cfg)
+
+
+def _feasible_sp_range(results, frac, tol, truncated):
+    """results: {sp: (min_frac, max_frac) | None} from the calc across an SP
+    grid. Returns (lo, hi, any_valid): the smallest and largest grid SP whose
+    damage roll-range is consistent with the observed `frac` (within `tol`).
+    Damage is monotone in SP, so the consistent set is a contiguous run; any
+    holes left by roll truncation are bridged (first..last consistent SP),
+    the conservative choice that never kills a particle a hole would spare.
+    lo is None with any_valid True means no SP is consistent -> kill; any_valid
+    False means the calc returned nothing usable -> treat as no evidence."""
+    lo = hi = None
+    any_valid = False
+    for sp in sorted(results):
+        r = results[sp]
+        if r is None:
+            continue
+        any_valid = True
+        mn, mx = r
+        ok = (mx >= frac - tol) if truncated else (mx >= frac - tol and mn <= frac + tol)
+        if ok:
+            if lo is None:
+                lo = sp
+            hi = sp
+    return lo, hi, any_valid
 
 
 def _quantile(sorted_pairs, q):
@@ -535,6 +934,15 @@ def _set_key(s):
     return (tuple(sorted(s["moves"])), s["item"], s["ability"], s["nature"])
 
 
+def _id_key(s):
+    """Nature-free identity (moves, item, ability). The dataset ALSO redacts
+    nature (every oracle set is 'serious'), and the spreads prior now hypothesizes
+    real natures per particle, so oracle grading must drop nature -- otherwise a
+    correct discrete set with an inferred Jolly nature would count as 'not in
+    prior' against the serious placeholder. Used only for --audit oracle tracking."""
+    return (tuple(sorted(s["moves"])), s["item"], s["ability"])
+
+
 def audit(max_battles, cfg=CFG):
     import pickle
     from collections import Counter
@@ -554,16 +962,23 @@ def audit(max_battles, cfg=CFG):
 
         bridge.calc_batch = timed
 
+    # stream the test-split records and stop once we have max_battles, so the
+    # 1.15GB bo3 pickle is never fully loaded (that pickle.load was its own OOM)
+    from data import iter_battles
+    paths = [cfg.parsed_dir / f"{fn[len('logs_'):-len('.json')]}.pkl"
+             for fn in cfg.dataset_files]
     battles = []
-    for fn in cfg.dataset_files:
-        fmt = fn[len("logs_"):-len(".json")]
-        with open(cfg.parsed_dir / f"{fmt}.pkl", "rb") as f:
-            battles += [b for b in pickle.load(f) if b["split"] == "test"]
-    battles = battles[:max_battles]
+    for rec in iter_battles(*paths):
+        if rec["split"] == "test":
+            battles.append(rec)
+            if len(battles) >= max_battles:
+                break
 
     mons = soft = hard = in_prior = top1 = depleted_battles = 0
     oracle_mass = 0.0
     by_species = Counter()
+    soft_by_cause, hard_by_cause = Counter(), Counter()
+    oracle_loss_by_cause, oracle_kills_by_cause = Counter(), Counter()
     t0 = time.perf_counter()
     for rec in battles:
         battle_depleted = False
@@ -572,20 +987,29 @@ def audit(max_battles, cfg=CFG):
             oracle = rec["teams"][opp]
             bel = OpponentBelief([_sid(s["species"]) for s in oracle], usage,
                                  cfg, bridge, my_team=rec["teams"][p])
+            # attribute what collapses each mon's TRUE set mass (see _apply_list).
+            # nature-free identity: the oracle's nature/SP are redacted, and the
+            # spreads prior hypothesizes real natures per particle.
+            bel.oracle_keyfn = _id_key
+            bel.oracle_keys = {k: _id_key(s) for k, s in enumerate(oracle)}
             for turn in rec["turns"]:
                 bel.update(turn["events"], viewer=p)
+            soft_by_cause.update(bel.soft_by_cause)
+            hard_by_cause.update(bel.hard_by_cause)
+            oracle_loss_by_cause.update(bel.oracle_loss_by_cause)
+            oracle_kills_by_cause.update(bel.oracle_kills_by_cause)
             for k, s in enumerate(oracle):
                 mons += 1
                 # archetype expansion: several particles share one set
                 # identity, so grade the set's TOTAL mass across its variants
                 mass_by_key = {}
                 for pt, w in zip(bel.particles[k], bel.weights[k]):
-                    key = _set_key(pt)
+                    key = _id_key(pt)
                     mass_by_key[key] = mass_by_key.get(key, 0.0) + w
-                ok = _set_key(s) in mass_by_key
+                ok = _id_key(s) in mass_by_key
                 in_prior += ok
                 if ok:
-                    m = mass_by_key[_set_key(s)]
+                    m = mass_by_key[_id_key(s)]
                     oracle_mass += m
                     top1 += m == max(mass_by_key.values())
                 if bel.soft_depletions[k]:
@@ -608,6 +1032,25 @@ def audit(max_battles, cfg=CFG):
     print("\nworst species (mons depleted | distinct train sets):")
     for sp, n in by_species.most_common(10):
         print(f"  {sp:24s} {n:4d} | {len(usage.get(sp, [])):4d}")
+
+    # --- which lever dominates -------------------------------------------
+    # soft/hard depletions attributed to the evidence channel that caused
+    # them. reveal_* => prior-coverage lever (widen/factor the prior);
+    # speed/damage => archetype-sharpness lever (soften evidence).
+    def _fmt(counter):
+        tot = sum(counter.values()) or 1
+        return "  ".join(f"{c}={n} ({n / tot:.0%})"
+                         for c, n in counter.most_common())
+    print("\nsoft depletions by cause: " + (_fmt(soft_by_cause) or "none"))
+    print("hard depletions by cause: " + (_fmt(hard_by_cause) or "none"))
+    # what collapses the TRUE set's mass when it IS present. Any weight on
+    # reveal_* here is a BUG (the oracle set contains every revealed move):
+    # suspect name normalization / mega form / consumed-item / ability
+    # attribution. speed/damage weight is the archetype-sharpness lever.
+    print("\noracle-set mass loss by cause (relative mass lost, when present):")
+    print("  " + (_fmt(oracle_loss_by_cause) or "none"))
+    print("oracle set driven to ~0 by cause (should have NO reveal_*):")
+    print("  " + (_fmt(oracle_kills_by_cause) or "none"))
     if bridge:
         bridge.close()
 
