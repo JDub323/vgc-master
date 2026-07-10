@@ -4,7 +4,7 @@ import copy
 
 import numpy as np
 
-from actions import to_index
+from actions import joint_choice, to_index
 from env import SidecarBattle, random_choice
 
 
@@ -39,10 +39,6 @@ class DecoupledUCTSearcher:
 
     def simulate(self, chooser, det):
         """Run one sidecar trajectory and back its scalar result up the path."""
-        # Imported here to keep the compatibility facade and versioned search
-        # brick free of an import cycle at module load time.
-        from agents.determinized_duct.v1 import joint_choice
-
         h = chooser.health
         h["sims"] += 1
         with chooser.dbg("restore"):
@@ -96,8 +92,6 @@ class DecoupledUCTSearcher:
 
     def leaf_value(self, chooser, det, battle, tracker, leaf):
         """Evaluate a leaf from the searching player's value orientation."""
-        from agents.determinized_duct.v1 import joint_choice
-
         h = chooser.health
         node, reached = leaf, 1
         for _ in range(max(1, chooser.cfg.rollout_depth) - 1):

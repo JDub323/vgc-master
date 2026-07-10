@@ -20,7 +20,8 @@ from agents.evaluation import EvaluationStore, evaluate_policy_prior
 from agents.evaluators.v1 import PolicyValueLeafEvaluator
 from agents.interfaces import BeliefModel, MoveChooser
 from agents.priors.v1 import PolicyValuePrior
-from agents.registry import (REGISTRY, implementation_source_hashes,
+from agents.registry import (HASH_SCHEME, REGISTRY, _normalized_source_hash,
+                             implementation_source_hashes,
                              verify_implementation_sources)
 from agents.search.v1 import DecoupledUCTSearcher
 from agents.spec import AgentSpec, default_duct_spec
@@ -208,6 +209,37 @@ def test_agent_spec_source_identity_fails_closed():
         raise AssertionError("changed implementation source was accepted")
 
 
+def test_ast_hash_ignores_docstrings_but_not_logic(tmp_path):
+    a = tmp_path / "a.py"
+    b = tmp_path / "b.py"
+    c = tmp_path / "c.py"
+    a.write_text('"""Doc."""\n\n\ndef f(x):\n    """Say."""\n    return x + 1\n')
+    b.write_text('# a comment\ndef f(x):\n    return x + 1  # inline\n')
+    c.write_text('def f(x):\n    return x + 2\n')
+    assert _normalized_source_hash(a) == _normalized_source_hash(b)
+    assert _normalized_source_hash(a) != _normalized_source_hash(c)
+    assert _normalized_source_hash(a, "raw-v1") != _normalized_source_hash(b, "raw-v1")
+
+
+def test_source_verification_honors_scheme_and_drift_override():
+    spec = default_duct_spec(CFG)
+    for scheme in ("raw-v1", HASH_SCHEME):
+        clean = dataclasses.replace(
+            spec, source={"hash_scheme": scheme,
+                          "files": implementation_source_hashes(spec, scheme=scheme)})
+        assert verify_implementation_sources(clean) == []
+    # legacy manifests (no hash_scheme) verify against raw bytes
+    legacy = dataclasses.replace(
+        spec, source={"files": implementation_source_hashes(spec, scheme="raw-v1")})
+    assert verify_implementation_sources(legacy) == []
+    tampered = dataclasses.replace(
+        spec, source={"hash_scheme": HASH_SCHEME,
+                      "files": dict(implementation_source_hashes(spec))
+                      | {"search/mcts.py": "0" * 64}})
+    drift = verify_implementation_sources(tampered, allow_drift=True)
+    assert drift == ["search/mcts.py"]
+
+
 def test_brick_evaluation_results_are_append_only(tmp_path):
     legal = actions(2)
     distribution = np.zeros(N_JOINT_ACTIONS)
@@ -236,11 +268,13 @@ if __name__ == "__main__":
         test_belief_v1_satisfies_external_lifecycle_contract,
         test_searcher_backup_and_root_aggregation_with_fake_nodes,
         test_agent_spec_source_identity_fails_closed,
+        test_source_verification_honors_scheme_and_drift_override,
     ]
     for test in no_tmp:
         test()
     with tempfile.TemporaryDirectory() as directory:
         tmp_path = Path(directory)
         test_agent_spec_round_trip_paths_and_registry(tmp_path)
+        test_ast_hash_ignores_docstrings_but_not_logic(tmp_path)
         test_brick_evaluation_results_are_append_only(tmp_path)
     print("all modular agent tests passed")

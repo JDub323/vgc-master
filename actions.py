@@ -17,6 +17,7 @@ mon); position-specific legality always comes from the sim request via
 legal_joint_actions.
 """
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -161,3 +162,39 @@ def legal_joint_actions(request: dict, team_idx_of_party_pos) -> list:
     a_acts = legal_slot_actions(request, 0, team_idx_of_party_pos)
     b_acts = legal_slot_actions(request, 1, team_idx_of_party_pos)
     return [(a, b) for a in a_acts for b in b_acts if joint_ok(a, b)]
+
+
+def _sid(name: str) -> str:
+    """Showdown id: lowercase alphanumerics only (same rule as data.sid)."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _pos_maps(request, name_to_idx):
+    """The request's current party order <-> team-preview indices.
+    Matching mirrors data.Side.mon(): the sim rewrites nicknames it wasn't
+    explicitly given — a name equal to the species id becomes the display
+    name ('archaludon' -> 'Archaludon'), and a name equal to a forme species
+    becomes the BASE species ('Typhlosion-Hisui' -> 'Typhlosion') — so idents
+    can't be trusted raw. Resolve each party slot by sid(nickname), then by
+    sid(details species), then by the pre-dash base name (Species Clause
+    makes that unique within a team)."""
+    n2i = {_sid(k): v for k, v in name_to_idx.items()}
+    base2i = {_sid(k.split("-")[0]): v for k, v in name_to_idx.items()}
+    keys = []
+    for p in request["side"]["pokemon"]:
+        nick = _sid(p["ident"].partition(": ")[2])
+        if nick not in n2i:
+            det = _sid(p["details"].split(",")[0])
+            nick = det if det in n2i else nick
+        if nick not in n2i and nick in base2i:
+            n2i[nick] = base2i[nick]
+        keys.append(nick)
+    idx_of_pos = lambda pos: n2i[keys[pos - 1]]
+    pos_of_idx = {n2i[n]: i + 1 for i, n in enumerate(keys) if n in n2i}
+    return idx_of_pos, pos_of_idx
+
+
+def joint_choice(request, joint, name_to_idx) -> str:
+    """(SlotAction, SlotAction) -> Showdown choice string for this request."""
+    _, pos_of_idx = _pos_maps(request, name_to_idx)
+    return to_choice_string(joint, lambda k: pos_of_idx[k])

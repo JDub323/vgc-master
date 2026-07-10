@@ -27,6 +27,7 @@ CLI: python benchmark.py archive <name> [--ckpt path] [--notes "..."]
                                       [--repeat R] [--quick N]
                                       [--teams t1,t2,...] [--spectate]
                                       [--port P] [--no-save]
+                                      [--allow-source-drift]
      python benchmark.py standings
 "current" as a contestant name means the live artifacts (ckpt_best.pt +
 vocab.json), so you can fight work-in-progress against any archive.
@@ -36,6 +37,12 @@ live dashboard (http://localhost:PORT) to flip between parallel games.
 --teams restricts to games where team A is one of the named teams, replaying
 those matchups with their original game seeds (the per-game seed index is
 preserved; outcomes reproduce up to GPU/thread float nondeterminism in search).
+Source identity: new archives record AST-normalized ("ast-v1") hashes, so
+comment/docstring churn does not invalidate them; legacy raw-byte manifests
+verify under their recorded scheme. A real mismatch still fails closed unless
+--allow-source-drift is passed, which runs the archive through CURRENT code,
+warns loudly, stamps every result row with the drifted files, and marks the
+contestant in report/standings.
 """
 
 import dataclasses
@@ -56,7 +63,8 @@ import numpy as np
 
 import teams as teams_mod
 from agents.ids import DETERMINIZED_DUCT_V1, LEGACY_SEARCH_V1
-from agents.registry import (build_agent, implementation_source_hashes,
+from agents.registry import (HASH_SCHEME, build_agent,
+                             implementation_source_hashes,
                              verify_implementation_sources)
 from agents.spec import (AGENT_SPEC_FILENAME, AgentSpec,
                          config_from_agent_spec, default_duct_spec)
@@ -201,7 +209,8 @@ def archive(name, ckpt=None, notes="", cfg=CFG):
     )
     spec = dataclasses.replace(
         spec, source=dict(spec.source) |
-        {"files": implementation_source_hashes(spec)})
+        {"hash_scheme": HASH_SCHEME,
+         "files": implementation_source_hashes(spec)})
     spec.dump(dst / AGENT_SPEC_FILENAME)
     (dst / "meta.json").write_text(json.dumps({
         "name": name, "created": date.today().isoformat(),
@@ -274,9 +283,10 @@ def list_bundles(cfg=CFG):
 class Contestant:
     """A complete frozen chooser specification plus its loaded neural assets."""
 
-    def __init__(self, name, cfg=CFG, device="cpu"):
+    def __init__(self, name, cfg=CFG, device="cpu", allow_source_drift=False):
         """Load ``current`` or one named legacy/static archive for inference."""
         self.name = name
+        self.source_drift = []
         if name == "current":
             ckpt, vocab = cfg.checkpoint_dir / "ckpt_best.pt", None
             self.agent_spec = default_duct_spec(
@@ -307,7 +317,8 @@ class Contestant:
                         f"{name}: static archive is incomplete: {missing}")
                 from agents.registry import REGISTRY
                 REGISTRY.validate(self.agent_spec)
-                verify_implementation_sources(self.agent_spec)
+                self.source_drift = verify_implementation_sources(
+                    self.agent_spec, allow_drift=allow_source_drift)
                 cfg_path = self.agent_spec.resolve(d, self.agent_spec.config)
                 self.archive_cfg = load_config_snapshot(cfg_path, base=cfg)
                 self.archive_cfg = config_from_agent_spec(
@@ -499,7 +510,7 @@ def series_pairings(team_names, repeat=1, quick=None, seed=7):
 def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                workers=4, repeat=1, quick=None, record=True, verbose=True,
                only_teams=None, spectate=False, save_replays=True,
-               port=8020, depth=None, label=None):
+               port=8020, depth=None, label=None, allow_source_drift=False):
     """The 100-game (per repeat) series. Returns the result rows.
 
     only_teams: restrict to games where team_a is in this set. The game index g
@@ -508,8 +519,8 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
     nondeterminism in search).
     spectate: serve a live dashboard; save_replays: write .log/.html per game."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    A = Contestant(name_a, cfg, device)
-    B = Contestant(name_b, cfg, device)
+    A = Contestant(name_a, cfg, device, allow_source_drift=allow_source_drift)
+    B = Contestant(name_b, cfg, device, allow_source_drift=allow_source_drift)
     run_cfg = dataclasses.replace(
         cfg, sims_per_move=sims or cfg.sims_per_move,
         rollout_depth=depth or cfg.rollout_depth)
@@ -590,6 +601,9 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                            "architecture", "legacy Searcher"),
                        "architecture_b": B.meta.get(
                            "architecture", "legacy Searcher")}
+                if A.source_drift or B.source_drift:
+                    res["source_drift_a"] = list(A.source_drift)
+                    res["source_drift_b"] = list(B.source_drift)
                 with jobs_lock:
                     results.append(res)
                     if verbose:
@@ -633,6 +647,11 @@ def report(name_a, name_b, results):
     if {r["era_a"] for r in results} != {r["era_b"] for r in results}:
         print("  NOTE: contestants come from different search/particle eras — "
               "the gap includes logic changes, not just the model")
+    drifted = {f for r in results
+               for f in r.get("source_drift_a", []) + r.get("source_drift_b", [])}
+    if drifted:
+        print("  NOTE: games ran with --allow-source-drift; archived agents "
+              "executed CURRENT code for: " + ", ".join(sorted(drifted)))
     by_team = {}
     for r in results:
         w = by_team.setdefault(r["team_a"], [0.0, 0])
@@ -690,9 +709,14 @@ def standings(cfg=CFG):
             m = sum(rating.values()) / len(rating)
             rating = {p: v / m for p, v in rating.items()}
         family = {}
+        tainted = set()
         for row in rows:
             family.setdefault(row["a"], row.get("architecture_a", "legacy Searcher"))
             family.setdefault(row["b"], row.get("architecture_b", "legacy Searcher"))
+            if row.get("source_drift_a"):
+                tainted.add(row["a"])
+            if row.get("source_drift_b"):
+                tainted.add(row["b"])
         print(f"\nera {era} ({len(rows)} games):")
         for architecture in sorted(set(family.values())):
             print(f"  {architecture}:")
@@ -700,8 +724,12 @@ def standings(cfg=CFG):
             for p in sorted(members, key=lambda p: -rating[p]):
                 games = sum(wins[p].values()) + sum(
                     wins[q][p] for q in players)
+                mark = " *drift" if p in tainted else ""
                 print(f"    {1500 + 400 * math.log10(rating[p]):7.0f}  {p}"
-                      f"  ({games:.0f} games)")
+                      f"  ({games:.0f} games){mark}")
+        if tainted:
+            print("  *drift: includes games where the archived sources did "
+                  "not match the running code (--allow-source-drift)")
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +764,8 @@ def main(cfg=CFG):
                    save_replays="--no-save" not in args,
                    port=int(opt("--port", 8020)),
                    depth=int(opt("--depth", 0)) or None,
-                   label=opt("--label"))
+                   label=opt("--label"),
+                   allow_source_drift="--allow-source-drift" in args)
     elif cmd == "standings":
         standings(cfg)
     else:

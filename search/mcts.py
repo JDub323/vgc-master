@@ -35,8 +35,10 @@ from collections import Counter
 
 import numpy as np
 
-from actions import (T_ALLY, T_AUTO, T_FOE_A, T_FOE_B, joint_index,
-                     legal_joint_actions, to_choice_string)
+# _pos_maps and joint_choice live in actions.py (the leaf module) and are
+# re-exported here for existing importers of search.mcts.
+from actions import (T_ALLY, T_AUTO, T_FOE_A, T_FOE_B, _pos_maps,
+                     joint_choice, joint_index, legal_joint_actions)
 from agents.encoding.v1 import TokenPositionEncoder
 from agents.evaluators.v1 import PolicyValueLeafEvaluator
 from agents.priors.v1 import PolicyValuePrior
@@ -50,37 +52,6 @@ from search.debug import SearchDebug, belief_report, root_table
 from search.node import Node
 
 TGT = {T_AUTO: "", T_FOE_A: ">1", T_FOE_B: ">2", T_ALLY: ">ally"}
-
-
-def _pos_maps(request, name_to_idx):
-    """The request's current party order <-> team-preview indices.
-    Matching mirrors data.Side.mon(): the sim rewrites nicknames it wasn't
-    explicitly given — a name equal to the species id becomes the display
-    name ('archaludon' -> 'Archaludon'), and a name equal to a forme species
-    becomes the BASE species ('Typhlosion-Hisui' -> 'Typhlosion') — so idents
-    can't be trusted raw. Resolve each party slot by sid(nickname), then by
-    sid(details species), then by the pre-dash base name (Species Clause
-    makes that unique within a team)."""
-    n2i = {sid(k): v for k, v in name_to_idx.items()}
-    base2i = {sid(k.split("-")[0]): v for k, v in name_to_idx.items()}
-    keys = []
-    for p in request["side"]["pokemon"]:
-        nick = sid(p["ident"].partition(": ")[2])
-        if nick not in n2i:
-            det = sid(p["details"].split(",")[0])
-            nick = det if det in n2i else nick
-        if nick not in n2i and nick in base2i:
-            n2i[nick] = base2i[nick]
-        keys.append(nick)
-    idx_of_pos = lambda pos: n2i[keys[pos - 1]]
-    pos_of_idx = {n2i[n]: i + 1 for i, n in enumerate(keys) if n in n2i}
-    return idx_of_pos, pos_of_idx
-
-
-def joint_choice(request, joint, name_to_idx) -> str:
-    """(SlotAction, SlotAction) -> Showdown choice string for this request."""
-    _, pos_of_idx = _pos_maps(request, name_to_idx)
-    return to_choice_string(joint, lambda k: pos_of_idx[k])
 
 
 def _joint_priors(joint_dist, joints, k):

@@ -151,11 +151,18 @@ the historical results should move too.
 Transfer is easy between machines with the same source and runtime, but it is
 deliberately strict rather than universally plug-and-play. The destination
 must retain every implementation ID in `agents/registry.py`, match the recorded
-behavior-source SHA-256 hashes, and use the recorded Python, Torch, NumPy,
+behavior-source hashes, and use the recorded Python, Torch, NumPy,
 Showdown, calc, and format identities. Machine-local paths such as the Node
-binary may differ. A mismatch fails closed instead of running the historical
-agent through newer behavior. To make a behavior-changing improvement
-transferable alongside old agents, add v2 modules/IDs and keep v1 intact.
+binary may differ. New archives record **AST-normalized (`ast-v1`) source
+hashes** — docstring/comment/formatting churn no longer invalidates an
+archive, while any logic edit still does; older manifests (no `hash_scheme`)
+keep verifying against raw file bytes. A real mismatch fails closed instead of
+running the historical agent through newer behavior — unless
+`benchmark.py play ... --allow-source-drift` is passed explicitly, which runs
+the archive through current code, warns loudly, records the drifted files on
+every result row, and marks the contestant with `*drift` in standings. To make
+a behavior-changing improvement transferable alongside old agents, add v2
+modules/IDs and keep v1 intact.
 
 ## Phase 1 — data + predictor
 
@@ -292,8 +299,12 @@ Compatibility contract:
 - Recorded runtime identities are checked before a static archive runs, so an
   engine or numerical-stack upgrade cannot silently change historical play.
   Resolved chooser/brick sources and behavior-critical shared modules are also
-  SHA-256 checked. Preserve the recorded dependency environment and v1 source
-  modules; add v2 modules for behavior-changing implementations.
+  hash-checked under the manifest's recorded scheme (`ast-v1` for new
+  archives — docstrings/comments don't count; raw bytes for legacy ones).
+  Mismatches fail closed by default; `--allow-source-drift` is the explicit,
+  result-tainting override for exploratory runs. Preserve the recorded
+  dependency environment and v1 source modules; add v2 modules for
+  behavior-changing implementations.
 - `agents/evaluation.py` provides append-only JSONL evaluations for policy
   prior recall/calibration/latency, token equivalence, leaf value calibration,
   belief deductions/depletion, and search scenario throughput. Results default

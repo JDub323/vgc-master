@@ -1,5 +1,6 @@
 """Explicit implementation registry and AgentSpec construction."""
 
+import ast
 import hashlib
 import inspect
 from pathlib import Path
@@ -124,7 +125,45 @@ BEHAVIOR_SOURCE_FILES = (
 )
 
 
-def implementation_source_hashes(spec, repo_root=None):
+# Source-identity hash schemes. Legacy manifests recorded raw file bytes
+# ("raw-v1", implied when a manifest has no hash_scheme); new manifests record
+# "ast-v1": a hash of the docstring-stripped AST, so comments/docstrings/
+# formatting churn does not invalidate an archive while any logic edit still
+# fails closed.
+HASH_SCHEME_RAW = "raw-v1"
+HASH_SCHEME_AST = "ast-v1"
+HASH_SCHEME = HASH_SCHEME_AST
+
+
+def _strip_docstrings(tree):
+    """Remove docstring statements from a parsed AST in place; return it."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = node.body
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            del body[0]
+            if not body:            # docstring-only body must stay valid
+                body.append(ast.Pass())
+    return tree
+
+
+def _normalized_source_hash(path, scheme=HASH_SCHEME):
+    """SHA-256 of one source file under ``scheme`` (raw bytes or AST)."""
+    data = Path(path).read_bytes()
+    if scheme == HASH_SCHEME_RAW or Path(path).suffix != ".py":
+        return hashlib.sha256(data).hexdigest()
+    if scheme != HASH_SCHEME_AST:
+        raise ValueError(f"unknown source hash scheme: {scheme!r}")
+    tree = _strip_docstrings(ast.parse(data))
+    dump = ast.dump(tree, include_attributes=False)
+    return hashlib.sha256(dump.encode()).hexdigest()
+
+
+def implementation_source_hashes(spec, repo_root=None, scheme=HASH_SCHEME):
     """SHA-256 identity for resolved implementation and shared source files."""
     spec = REGISTRY.validate(spec)
     root = Path(repo_root or Path(__file__).resolve().parent.parent).resolve()
@@ -147,25 +186,39 @@ def implementation_source_hashes(spec, repo_root=None):
         raise FileNotFoundError(
             "implementation source files are missing: " + ", ".join(missing))
     return {
-        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        str(path.relative_to(root)): _normalized_source_hash(path, scheme)
         for path in sorted(paths)
     }
 
 
-def verify_implementation_sources(spec, repo_root=None):
-    """Return ``None`` or raise if any manifest-recorded source hash differs."""
+def verify_implementation_sources(spec, repo_root=None, allow_drift=False):
+    """Compare manifest-recorded source hashes against this checkout.
+
+    Verification runs under the scheme the manifest recorded
+    (``source["hash_scheme"]``; absent means legacy raw bytes). Returns the
+    sorted list of drifted paths — empty when identity holds. A non-empty
+    result raises unless ``allow_drift`` is true, in which case a loud warning
+    is printed and the caller is expected to mark downstream results tainted.
+    """
     expected = spec.source.get("files", {})
     if not expected:
-        return
-    current = implementation_source_hashes(spec, repo_root)
+        return []
+    scheme = spec.source.get("hash_scheme", HASH_SCHEME_RAW)
+    current = implementation_source_hashes(spec, repo_root, scheme=scheme)
     differences = [
         path for path in sorted(set(expected) | set(current))
         if expected.get(path) != current.get(path)
     ]
-    if differences:
-        raise RuntimeError(
-            "archived implementation source identity mismatch: "
-            + ", ".join(differences))
+    if not differences:
+        return []
+    message = (f"archived implementation source identity mismatch "
+               f"({scheme}): " + ", ".join(differences))
+    if not allow_drift:
+        raise RuntimeError(message)
+    print(f"  WARNING: {message}\n"
+          "  --allow-source-drift is set: running the archive through "
+          "CURRENT code; results will be recorded as source-drifted")
+    return differences
 
 
 def build_agent(spec, **kwargs):

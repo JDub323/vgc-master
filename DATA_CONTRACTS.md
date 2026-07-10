@@ -173,6 +173,9 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `to_choice_string(joint,map_fn)` | `JointAction`, mapping callable | Comma-separated Showdown choice `str`. |
 | `legal_slot_actions(request,slot,map_fn)` | `Request`, slot, party-position-to-team-index callable | `list[SlotAction]`. |
 | `legal_joint_actions(request,map_fn)` | `Request`, mapping callable | Position-legal `list[JointAction]`. |
+| `_sid(name)` | Display name `str` | Lowercase alphanumeric Showdown id `str` (same rule as `data.sid`). |
+| `_pos_maps(request,name_to_idx)` | Raw request and set-name-to-preview-index mapping | `(party_pos->team_idx callable, dict[team_idx,party_pos])`. |
+| `joint_choice(request,joint,name_to_idx)` | Request, joint action, identity mapping | Showdown choice string; re-exported by `search.mcts` for legacy importers. |
 
 ### `config.py`
 
@@ -431,8 +434,10 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `register_agent`, `register_brick` | Implementation id and class | `None`; mutate registry. |
 | `validate(spec)` | Spec/mapping | Parsed `AgentSpec`; raises on unavailable or missing IDs. |
 | `build(spec,model,tokenizer,cfg,seed,debug,sidecar,apply_spec_config)` | Manifest plus runtime dependencies | Concrete `MoveChooser`. |
-| `implementation_source_hashes(spec,repo_root)` | Spec and optional source root | `dict[relative_path, sha256_hex]`. |
-| `verify_implementation_sources(spec,repo_root)` | Spec/root | `None` or raises on mismatch. |
+| `_strip_docstrings(tree)` | Parsed `ast` tree | Same tree with docstring statements removed in place (`pass` inserted when a body would empty). |
+| `_normalized_source_hash(path,scheme)` | Source path and hash scheme (`raw-v1`/`ast-v1`) | SHA-256 hex `str` of raw bytes or the docstring-stripped AST dump. |
+| `implementation_source_hashes(spec,repo_root,scheme)` | Spec, optional source root, hash scheme | `dict[relative_path, sha256_hex]`. |
+| `verify_implementation_sources(spec,repo_root,allow_drift)` | Spec/root and drift-override flag | Sorted drifted-path `list[str]` (empty when identity holds); raises on mismatch unless `allow_drift`, which warns instead. |
 | `build_agent(spec,**kwargs)` | Same as registry build | Concrete chooser. |
 
 ### `agents/evaluation.py`
@@ -458,8 +463,6 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `Node._pick(p,n,w,total,c_puct)` | Parallel prior/count/value arrays and exploration values | Selected action index `int`. |
 | `Node.select(c_puct)` | Exploration scalar | `(my_action_index, opp_action_index)`. |
 | `Node.update(i,j,z)` | Selected indices and searching-side result | `None`; increments both zero-sum bandit tables. |
-| `_pos_maps(request,name_to_idx)` | Raw request and set-name-to-preview-index mapping | `(party_pos->team_idx callable, dict[team_idx,party_pos])`. |
-| `joint_choice(request,joint,name_to_idx)` | Request, joint action, identity mapping | Showdown choice string. |
 | `_joint_priors(joint_dist,joints,k)` | Flat model distribution, legal actions, optional k | Compatibility delegation to v1 prior. |
 | `DetGame(searcher,tracker,opp_sample,my_id,my_request,my_brought,opp_brought,solve)` | Chooser orchestration inputs and one sampled team | Reconstructed determinization object/root node. |
 | `Searcher(model,tok,cfg,seed,debug,sidecar,position_encoder,policy_prior,leaf_evaluator,searcher)` | Inference/tokenizer/runtime and optional injected bricks | Legacy-compatible full chooser; owns sidecar/bridge only when not injected. |
@@ -491,7 +494,7 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `archive(name,ckpt,notes,cfg)` | Unique name, optional explicit checkpoint, notes, config | `None`; creates immutable full-agent directory or raises. |
 | `rename(old,new,cfg)` | Archive names/config | `None`; renames bundle and migrates result references. |
 | `list_bundles(cfg)` | Config | `None`; prints directories containing metadata. |
-| `Contestant(name,cfg,device)` | `'current'` or archive name, config, Torch device | Loaded model/tokenizer/spec/config/usage holder. |
+| `Contestant(name,cfg,device,allow_source_drift)` | `'current'` or archive name, config, Torch device, drift override | Loaded model/tokenizer/spec/config/usage holder; `.source_drift` lists any tolerated hash drift. |
 | `_verify_runtime(spec,current_cfg)` | Static manifest/current environment | `None`; raises on recorded mismatch. |
 | `_runtime_cfg(saved,current,bundle,strict)` | Saved/current configs, optional archive root | Config with frozen assets and machine-local paths. |
 | `_load_usage(search_cfg,current_cfg,strict)` | Configs/strict flag | Decoded usage mapping. |
@@ -500,11 +503,11 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `_make_searcher(contestant,run_cfg)` | Loaded contestant and run config | Exact registered `MoveChooser` or legacy searcher. |
 | `run_game(sc,bots,sets_by_side,cfg,temperature,rng,max_turns,feed)` | Shared sidecar, side->Bot, true sets, options, optional spectator feed | `(winner_side|None, turns:int)`. |
 | `series_pairings(team_names,repeat,quick,seed)` | Names/count/subsample options | Ordered `list[(team_a,team_b)]`. |
-| `run_series(...)` | Contestant names, budgets/workers/replay/record filters | `list[BenchmarkResult]`; optionally appends registry/replays. |
+| `run_series(...)` | Contestant names, budgets/workers/replay/record filters, `allow_source_drift` | `list[BenchmarkResult]`; optionally appends registry/replays; drifted runs carry `source_drift_a/b` file lists. |
 | `report(name_a,name_b,results)` | Labels and game rows | `None`; prints score/CI/Elo/team split. |
 | `wilson(w,n,z)` | Score successes, count, z | `(lower,upper)` confidence bounds. |
 | `elo_diff(score)` | Score fraction | Elo difference `float` with endpoint clipping. |
-| `standings(cfg)` | Config | `None`; prints era-separated, architecture-grouped BT ratings. |
+| `standings(cfg)` | Config | `None`; prints era-separated, architecture-grouped BT ratings, flagging `*drift` contestants. |
 | `main(cfg)` | Config and CLI args | `None`; dispatches archive/list/rename/play/standings. |
 
 ### `selfplay.py`
