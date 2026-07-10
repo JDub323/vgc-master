@@ -9,7 +9,10 @@ from actions import N_SLOT_ACTIONS, SlotAction, T_FOE_A, T_FOE_B, to_index
 
 
 class RandomPolicy:
+    """Offline evaluator baseline with uniform per-slot distributions."""
+
     def predict_batch(self, dmg_active):
+        """Return NumPy float ``[B,2,39]`` uniform distributions."""
         b = len(dmg_active)
         return np.full((b, 2, N_SLOT_ACTIONS), 1.0 / N_SLOT_ACTIONS)
 
@@ -19,9 +22,11 @@ class MaxDamagePolicy:
     damage. Slots with no damage information fall back to uniform."""
 
     def __init__(self, eps=0.05):
+        """Store smoothing mass ``eps`` for non-greedy actions."""
         self.eps = eps   # smoothing so log-loss is finite
 
     def predict_batch(self, dmg_active):
+        """Map NumPy damage grids ``[B,2,4,2]`` to ``[B,2,39]`` priors."""
         b = len(dmg_active)
         out = np.full((b, 2, N_SLOT_ACTIONS), self.eps / N_SLOT_ACTIONS)
         for i, grid in enumerate(np.asarray(dmg_active, dtype=np.float64)):

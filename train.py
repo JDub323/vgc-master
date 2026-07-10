@@ -31,7 +31,10 @@ from tokenizer import PositionTokenizer
 
 
 class Shards(Dataset):
+    """In-memory concatenation of one BC split's NPZ arrays."""
+
     def __init__(self, split, cfg=CFG):
+        """Load and concatenate ``<split>_*.npz`` from ``cfg.prepped_dir``."""
         files = sorted(glob(str(cfg.prepped_dir / f"{split}_*.npz")))
         parts = [np.load(f) for f in files]
         self.tokens = np.concatenate([p["tokens"] for p in parts])
@@ -44,6 +47,7 @@ class Shards(Dataset):
         self.weight = self.weight / self.weight.mean()
 
     def __len__(self):
+        """Return the number of transition rows."""
         return len(self.tokens)
 
     def __getitem__(self, idxs):
@@ -71,6 +75,7 @@ def make_loader(ds, batch_size, shuffle, device, cfg=CFG):
 
 
 def compute_loss(model, batch, cfg=CFG):
+    """Return ``(scalar_loss, detached_metric_tensors)`` for one BC batch."""
     tokens, acts, value_t, w, items_t, abils_t, moves_t = batch
     pol, value, (item_lg, abil_lg, move_lg) = model(tokens)
     if pol.dim() == 2:                     # joint head: one masked 1521-way CE
@@ -104,6 +109,7 @@ def compute_loss(model, batch, cfg=CFG):
 
 
 def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
+    """Run one train/eval epoch and return mean Python-float metrics."""
     model.train(opt is not None)
     agg, n = {}, 0
     autocast = torch.autocast(device, dtype=torch.bfloat16,
@@ -130,6 +136,7 @@ def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
 
 
 def main(cfg=CFG):
+    """Build/resume, train, validate, and checkpoint from CLI/config inputs."""
     epochs = int(sys.argv[1]) if len(sys.argv) > 1 else cfg.epochs
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_float32_matmul_precision("high")     # TF32 outside autocast

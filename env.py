@@ -262,11 +262,15 @@ rl.on('line', (line) => {
 
 
 class Sidecar:
+    """Owner of one JSON-lines Pokémon Showdown Node subprocess."""
+
     def __init__(self, cfg=CFG):
+        """Start the sidecar using Node paths and format fallback from ``cfg``."""
         self.proc, self._stderr_tail = spawn_node(cfg, "sidecar.js", _SIDECAR_JS)
         self._rid = 0
 
     def rpc(self, obj):
+        """Send one JSON-safe mapping and return its decoded response mapping."""
         self._rid += 1
         try:
             self.proc.stdin.write(json.dumps({**obj, "rid": self._rid}) + "\n")
@@ -285,6 +289,7 @@ class Sidecar:
         return out
 
     def close(self):
+        """Close stdin and wait for the owned Node subprocess; return ``None``."""
         try:
             self.proc.stdin.close()
         except (BrokenPipeError, OSError):
@@ -296,6 +301,7 @@ class SidecarBattle:
     """One forkable battle in the sidecar."""
 
     def __init__(self, sidecar, resp):
+        """Wrap a sidecar create/restore response and cache battle state fields."""
         self.sc = sidecar
         self.id = resp["id"]
         self.requests = resp["requests"]
@@ -306,6 +312,7 @@ class SidecarBattle:
 
     @classmethod
     def create(cls, sidecar, format_id, p1team, p2team):
+        """Create and return a battle from format id and two packed-team strings."""
         resp = sidecar.rpc({"op": "create", "format": format_id,
                             "p1team": p1team, "p2team": p2team})
         b = cls(sidecar, resp)
@@ -323,16 +330,20 @@ class SidecarBattle:
         return resp
 
     def save(self):
+        """Return an opaque JSON-serializable simulator snapshot."""
         return self.sc.rpc({"op": "save", "id": self.id})["state"]
 
     @classmethod
     def restore(cls, sidecar, state):
+        """Create an independent battle fork from a saved simulator state."""
         return cls(sidecar, sidecar.rpc({"op": "restore", "state": state}))
 
     def destroy(self):
+        """Free this battle id inside the sidecar; return ``None``."""
         self.sc.rpc({"op": "destroy", "id": self.id})
 
     def pending_sides(self):
+        """Return side ids whose non-wait requests need choices."""
         return [s for s, r in self.requests.items() if r and not r.get("wait")]
 
 
@@ -478,6 +489,7 @@ TEAM_B = ("Metagross||metagrossite|clearbody|hammerarm,ironhead,psychicfangs,pro
 
 
 def dump_dex(cfg=CFG):
+    """Query the pinned simulator and write ``artifacts/dex.json``."""
     sc = Sidecar(cfg)
     d = sc.rpc({"op": "dumpdex", "format": cfg.format_id})
     cfg.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -491,6 +503,7 @@ def dump_dex(cfg=CFG):
 
 
 def benchmark(cfg=CFG, n_steps=2000, seed=7):
+    """Assert save/restore replay identity and print step/fork throughput."""
     rng = random.Random(seed)
     sc = Sidecar(cfg)
     b = SidecarBattle.create(sc, cfg.format_id, TEAM_A, TEAM_B)
@@ -615,9 +628,9 @@ def make_live_player(sets, searcher, usage, cfg=CFG, on_decision=None,
     particle filter per battle, and asks the searcher for a mixed strategy at
     every move request; orders go out as raw Showdown choice strings.
 
-    `searcher` is anything with .choose(tracker, belief, my_id, request,
-    brought) -> (joint, info) and a .bridge attribute — play.py plugs in
-    policy-only / max-damage / random choosers through the same seam.
+    `searcher` is any `MoveChooser`: `.choose(tracker, belief, my_id, request,
+    brought) -> (JointAction, ChoiceInfo)` plus a `.bridge` attribute. play.py
+    plugs policy-only / max-damage / random choosers through the same seam.
     `on_decision(battle, game, info)` is called after every decision (the
     play.py dashboard hook)."""
     from poke_env.player import Player
@@ -665,8 +678,11 @@ def make_live_player(sets, searcher, usage, cfg=CFG, on_decision=None,
                             for p in battle.teampreview_opponent_team]
                 tracker = LogParser(battle.battle_tag, 0, "", cfg.format_id)
                 tracker.sides = {me: Side(sets), opp: Side(opp_sets)}
-                belief = OpponentBelief([sid(s["species"]) for s in opp_sets],
-                                        usage, cfg, searcher.bridge, my_team=sets)
+                belief_cls = getattr(
+                    searcher, "belief_model_cls", OpponentBelief)
+                belief = belief_cls(
+                    [sid(s["species"]) for s in opp_sets], usage, cfg,
+                    searcher.bridge, my_team=sets)
                 g = {"tracker": tracker, "belief": belief, "fed": 0,
                      "brought": list(range(min(4, len(sets))))}
                 self.games[battle.battle_tag] = g
@@ -697,17 +713,18 @@ def make_live_player(sets, searcher, usage, cfg=CFG, on_decision=None,
 
 
 def run_live(ckpt, team_packed, n_games=1, ladder=False, cfg=CFG):
+    """Load the versioned chooser and play ladder or accepted live games."""
     import asyncio
 
     import torch
 
+    from agents.determinized_duct.v1 import DeterminizedDUCTChooser
     from models.policy_value import PolicyValueNet
-    from search.mcts import Searcher
     from tokenizer import PositionTokenizer
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    searcher = Searcher(PolicyValueNet.load(ckpt, cfg, device),
-                        PositionTokenizer.load(cfg), cfg)
+    searcher = DeterminizedDUCTChooser(
+        PolicyValueNet.load(ckpt, cfg, device), PositionTokenizer.load(cfg), cfg)
     usage = json.loads((cfg.artifacts_dir / "usage_stats.json").read_text())
     player = make_live_player(parse_packed_team(team_packed), searcher, usage, cfg)
     if ladder:

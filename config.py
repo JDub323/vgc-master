@@ -9,6 +9,7 @@ from pathlib import Path
 
 @dataclass
 class Config:
+    """Typed source of every path, data, model, belief, search, and play knob."""
     # ---- format ----
     # Play format. Switch to "gen9championsvgc2026regma" for Reg M-A.
     format_id: str = "gen9championsvgc2026regmb"
@@ -191,6 +192,7 @@ LEGACY_MISSING_DEFAULTS = {
 
 
 def _jsonable(v):
+    """Recursively convert dataclass values and paths to JSON-safe values."""
     if isinstance(v, Path):
         return str(v)
     if isinstance(v, tuple):
@@ -213,6 +215,7 @@ def config_snapshot(cfg=CFG):
 
 
 def _parse_legacy_string(s):
+    """Parse old stringified config values, falling back to the input string."""
     if s in ("True", "False"):
         return s == "True"
     if s == "None":
@@ -224,6 +227,7 @@ def _parse_legacy_string(s):
 
 
 def _coerce_like(default, value):
+    """Coerce a decoded value to the type represented by ``default``."""
     if isinstance(value, str):
         value = _parse_legacy_string(value)
     if isinstance(default, Path):
@@ -258,6 +262,7 @@ def config_from_snapshot(snapshot, base=None):
 
 
 def load_config_snapshot(path, base=None):
+    """Read JSON and return ``config_from_snapshot(..., base=base)``."""
     return config_from_snapshot(json.loads(Path(path).read_text()), base=base)
 
 

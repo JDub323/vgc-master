@@ -28,7 +28,8 @@ from data import LogParser, Side, parse_packed_team, sid
 from env import (TEAM_A, TEAM_B, Sidecar, SidecarBattle, pack_team,
                  random_choice)
 from models.policy_value import PolicyValueNet
-from search.mcts import Searcher, joint_choice
+from agents.determinized_duct.v1 import DeterminizedDUCTChooser
+from search.mcts import joint_choice
 from tokenizer import PositionTokenizer
 
 
@@ -41,8 +42,11 @@ def cts_placeholder(s):
 
 
 class Bot:
+    """One CTS-honest side: tracker, external belief, chooser, and true oracle."""
+
     def __init__(self, side, my_sets, opp_sets, searcher, usage, cfg,
                  debug=False):
+        """Initialize from side id, full teams, chooser, usage prior, and config."""
         self.side, self.cfg = side, cfg
         self.opp = "p2" if side == "p1" else "p1"
         self.searcher = searcher
@@ -52,17 +56,20 @@ class Bot:
         self.tracker.sides = {
             side: Side(my_sets),
             self.opp: Side([cts_placeholder(s) for s in opp_sets])}
-        self.belief = OpponentBelief([sid(s["species"]) for s in opp_sets],
-                                     usage, cfg, searcher.bridge,
-                                     my_team=my_sets)
+        belief_cls = getattr(searcher, "belief_model_cls", OpponentBelief)
+        self.belief = belief_cls([sid(s["species"]) for s in opp_sets],
+                                 usage, cfg, searcher.bridge,
+                                 my_team=my_sets)
         self.name_to_idx = {s["name"]: k for k, s in enumerate(my_sets)}
         self.brought = list(range(len(my_sets)))   # narrowed at team preview
 
     def feed(self, lines):
+        """Feed protocol-line strings into the mutable ``LogParser``."""
         for line in lines:
             self.tracker.feed(line)
 
     def decide(self, request, temperature):
+        """Update belief and return ``(Showdown choice str, ChoiceInfo)``."""
         self.belief.update(self.tracker.drain_events(), viewer=self.side)
         joint, info = self.searcher.choose(
             self.tracker, self.belief, self.side, request, self.brought,
@@ -70,6 +77,7 @@ class Bot:
         return joint_choice(request, joint, self.name_to_idx), info
 
     def show(self, info):
+        """Print public state, beliefs, value, opponent prior, and strategy."""
         t = self.tracker
         print(f"\n=== turn {t.turn_no} — {self.side} thinking ===")
         for pid in ("p1", "p2"):
@@ -104,6 +112,7 @@ class Bot:
 
 
 def play_game(sc, bots, teams, cfg, step_mode, temperature, p2_random, rng):
+    """Play one observed battle and return winner ``SideID|None``."""
     b = SidecarBattle.create(sc, cfg.format_id,
                              pack_team(teams["p1"]), pack_team(teams["p2"]))
     for bot in bots.values():
@@ -140,6 +149,7 @@ def play_game(sc, bots, teams, cfg, step_mode, temperature, p2_random, rng):
 
 
 def main(cfg=CFG):
+    """Load the versioned chooser and run one observed game from CLI flags."""
     args = sys.argv[1:]
 
     def opt(flag, default=None):
@@ -151,7 +161,7 @@ def main(cfg=CFG):
     model = PolicyValueNet.load(ckpt, cfg, device)
     tok = PositionTokenizer.load(cfg)
     debug = "--debug" in args
-    searcher = Searcher(model, tok, cfg, debug=debug)
+    searcher = DeterminizedDUCTChooser(model, tok, cfg, debug=debug)
     usage = json.loads((cfg.artifacts_dir / "usage_stats.json").read_text())
 
     teams = {"p1": parse_packed_team(TEAM_A), "p2": parse_packed_team(TEAM_B)}

@@ -75,7 +75,10 @@ rl.on('line', (line) => {
 
 
 class DamageBridge:
+    """Cached owner of one persistent ``@smogon/calc`` subprocess."""
+
     def __init__(self, cfg=CFG):
+        """Start the calculator using Node paths from ``cfg``."""
         from env import spawn_node
         self.proc, self._stderr_tail = spawn_node(cfg, "dmg_bridge.js", _BRIDGE_JS)
         self.cache = {}
@@ -120,6 +123,7 @@ class DamageBridge:
         return [self.cache[k] for k in keys]
 
     def close(self):
+        """Close stdin and wait for the calc subprocess; return ``None``."""
         try:
             self.proc.stdin.close()
         except (BrokenPipeError, OSError):
@@ -183,4 +187,5 @@ def damage_features(state, beliefs, bridge) -> dict:
 
 
 def _sid(name):
+    """Return lowercase alphanumeric Showdown id."""
     return re.sub(r"[^a-z0-9]", "", name.lower())

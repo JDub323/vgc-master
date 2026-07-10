@@ -43,53 +43,45 @@ python3 teams.py --validate
 # play against the bot in the official Showdown client (spawns local server + dashboard)
 python3 play.py
 
-# Example pipeline:
+# full pytest suite from the repository virtualenv (code/bricks + real Node/calc fixtures)
+.venv/bin/python -m pytest -q
 
-0. Push here, then get the branch on the box
-# on your laptop
-git push -u origin phase-3-selfplay
+# reviewer-facing function/data contracts and stale-documentation gate only
+python tests/test_documentation.py
 
-# on the big box (currently on master, clean)
-git fetch origin
-git checkout phase-3-selfplay
-git log --oneline -1          # confirm: ae91200 phase 3: self-play...
+# Current end-to-end pipeline:
 
-1. Freeze the phase-1 baseline — MUST be first
-This copies the current (layout-1) vocab.json + ckpt_best.pt before step 3 overwrites them.
-python benchmark.py archive v1-bc --notes "phase-1 behavior-cloned baseline"
-python benchmark.py list       # verify: v1-bc, head=slot, tokens=537
+1. Verify this checkout and runtime before producing artifacts
+.venv/bin/python -m pytest -q
+python env.py --selftest
+python env.py --benchmark
 
-2. Verify the untested code against real Node (do before retraining)
-python env.py --selftest       # reconstruct incl. NEW stall-counter assert — most likely failure point
-python beliefs.py --audit      # archetype expansion: depletion / in-prior rates
-python scenarios.py            # search gates + 2 new diagnostic scenarios (non-gating)
+2. Build current layout-3 data (561 tokens: Protect + inferred belief latent)
+python data.py download
+python data.py parse
+python data.py prep
 
-# optional: profile before committing to the overnight run, to size self-play
-python env.py --benchmark      # sims/sec + forks/sec on THIS box
+3. Train and evaluate the joint policy/value model
+python train.py
+python evaluate.py
+python evaluate.py --switches
+python evaluate.py --worst 20
+python evaluate.py --aux
+python scenarios.py
 
-3. Re-prep + retrain the predictor (layout 2, joint head)
-python data.py prep            # rebuilds shards at 561 tokens (overwrites vocab.json)
-python train.py                # joint-head BC; torch.compile on if CUDA
-
-4. Confirm the new predictor before self-play
-python evaluate.py             # recall@k must hold up vs baselines
-
-# optional diagnostics for your specific concerns
-python evaluate.py --switches  # is switching underweighted in the prior?
-python evaluate.py --worst 20  # where the joint head still misreads
-python evaluate.py --aux       # aux set-prediction vs beliefs.py --audit
-
-# gate: is the retrained predictor at least as strong as frozen v1?
-python benchmark.py play current v1-bc
-
-5. Self-play (only after step 4 looks good)
-python selfplay.py --hours 10          # resumable; re-run to continue
-
-# after it runs: archive a milestone and measure the gain
-python benchmark.py archive sp-iter8 --ckpt artifacts/checkpoints/selfplay/sp_iter_008.pt
-python benchmark.py play sp-iter8 v1-bc
+4. Promote ckpt_best.pt to a complete static agent (not just a checkpoint)
+python benchmark.py archive my-agent-v1 --notes "describe model and brick changes"
+python benchmark.py list
+python benchmark.py play current my-agent-v1
 python benchmark.py standings
 
-One note: if env.py --selftest or scenarios.py fails in step 2, stop and fix before step 3
-— those exercise the reconstruct/stall/archetype code that has never run against real Node,
-and retraining on top of a broken tokenizer wastes the long training run.
+5. Continue with self-play and explicitly archive milestones
+python selfplay.py --hours 10
+python benchmark.py archive sp-iter8 --ckpt artifacts/checkpoints/selfplay/sp_iter_008.pt
+python benchmark.py play sp-iter8 my-agent-v1
+python benchmark.py standings
+
+# Model discovery is explicit: pytest loads no trained model; `current` and
+# scenarios/evaluate use ckpt_best.pt; sp_iter_*.pt must be named with --ckpt.
+# Copy the entire artifacts/benchmarks/<name>/ directory when transferring an
+# agent. agent.json, vocab/config/assets, matching source, and runtime matter.

@@ -31,6 +31,8 @@ MODEL_CFG_FIELDS = ("d_model", "n_layers", "n_heads", "d_ff", "dropout")
 
 
 class PolicyValueNet(nn.Module):
+    """Transformer joint-policy/value/hidden-set auxiliary network."""
+
     def __init__(self, vocab_size, n_tokens, opp_positions,
                  n_moves, n_items, n_abilities, cfg=CFG, policy_head="slot",
                  model_cfg=None):
@@ -113,11 +115,13 @@ class PolicyValueNet(nn.Module):
                  "moves": torch.sigmoid(moves).cpu().numpy()})
 
     def save(self, path):
+        """Write hyperparameters, eager-keyed state, and config snapshot."""
         torch.save({"hp": self.hp, "state": clean_state_dict(self),
                     "cfg": self.cfg_snapshot}, path)
 
     @classmethod
     def load(cls, path, cfg=CFG, device="cpu"):
+        """Return a checkpoint-restored model on ``device``."""
         ck = torch.load(path, map_location=device, weights_only=False)
         load_cfg = config_from_snapshot(ck.get("cfg"), base=cfg)
         hp = dict(ck["hp"])

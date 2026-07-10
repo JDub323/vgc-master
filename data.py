@@ -49,6 +49,7 @@ def parse_packed_team(packed: str) -> list:
 
 
 def base_species(species: str) -> str:
+    """Strip a Showdown ``-Mega``, ``-Mega-X``, or ``-Mega-Y`` suffix."""
     return re.sub(r"-Mega(-[XY])?$", "", species)
 
 
@@ -70,7 +71,10 @@ STALL_ADDERS = {"protect", "detect", "endure", "kingsshield", "spikyshield",
 
 
 class Mon:
+    """Mutable public state for one team-preview-indexed Pokémon."""
+
     def __init__(self, team_idx, set_):
+        """Initialize from ``team_idx:int`` and a full ``PokemonSet`` mapping."""
         self.team_idx = team_idx
         self.set = set_
         self.species_cur = set_["species"]
@@ -98,6 +102,7 @@ class Mon:
         self.revealed_ability = None
 
     def view_own(self):
+        """Return a full-information ``MonOwnView`` mapping."""
         return {"team_idx": self.team_idx, "species_cur": self.species_cur,
                 "hp": self.hp, "status": self.status, "boosts": dict(self.boosts),
                 "fainted": self.fainted, "active_slot": self.active_slot,
@@ -106,6 +111,7 @@ class Mon:
                 "item_consumed": self.item_consumed, "set": self.set}
 
     def view_opp(self):
+        """Return a redacted CTS-safe ``MonOpponentView`` mapping."""
         return {"team_idx": self.team_idx, "species_cur": self.species_cur,
                 "level": self.set["level"], "gender": self.set["gender"],
                 "hp": self.hp, "status": self.status, "boosts": dict(self.boosts),
@@ -119,13 +125,17 @@ class Mon:
 
 
 class Side:
+    """Mutable team/side state and nickname-to-mon resolution."""
+
     def __init__(self, team):
+        """Build preview-ordered ``Mon`` objects from ``list[PokemonSet]``."""
         self.mons = [Mon(i, s) for i, s in enumerate(team)]
         self.mega_used = False
         self.conditions = dict.fromkeys(SIDE_CONDS.values(), False)
         self.by_name = {m.set["name"]: m for m in self.mons}
 
     def mon(self, nickname, details=""):
+        """Resolve protocol identity strings to a tracked ``Mon``."""
         if nickname in self.by_name:
             return self.by_name[nickname]
         # nicknames are often the bare species while details carry the forme
@@ -151,6 +161,7 @@ class Side:
         return m
 
     def active(self, slot):
+        """Return the live/tracked ``Mon`` in slot ``0|1``, else ``None``."""
         return next((m for m in self.mons if m.active_slot == slot), None)
 
 
@@ -158,6 +169,7 @@ class LogParser:
     """One battle log -> record with both perspectives' states/actions/events."""
 
     def __init__(self, tag, ts, log, fmt):
+        """Initialize batch or streaming parsing state for one battle."""
         self.tag, self.ts, self.log, self.fmt = tag, ts, log, fmt
         self.seen_species = set()   # formes that appeared (incl. megas), for vocab
         self.sides = {}
@@ -188,6 +200,7 @@ class LogParser:
         return side_id, slot, self.sides[side_id].mon(nick, details)
 
     def _hp(self, s):
+        """Parse a condition string to ``(hp_fraction, status_id)``."""
         cur = s.split(" ")[0]
         m = re.match(r"(\d+)(?:/(\d+))?", cur)   # '56/100y' has an hp-color suffix
         status = next((t for t in s.split(" ")[1:] if t in STATUSES), "")
@@ -219,11 +232,13 @@ class LogParser:
             self._reveal(side_id, mon, kind.strip(), name.strip())
 
     def _spe_ctx(self, side_id, mon):
+        """Return ``{'spe':stage,'par':bool,'tw':bool}`` speed context."""
         return {"spe": mon.boosts["spe"], "par": mon.status == "par",
                 "tw": self.sides[side_id].conditions["tailwind"]}
 
     # -- snapshots ---------------------------------------------------------
     def _view(self, p):
+        """Return one side's complete CTS ``PositionState`` snapshot."""
         me, opp = self.sides[p], self.sides["p2" if p == "p1" else "p1"]
         return {
             "turn": self.turn_no, "weather": self.weather,
@@ -320,6 +335,7 @@ class LogParser:
         return evs
 
     def parse(self):
+        """Parse the stored log and return a battle record mapping or ``None``."""
         for line in self.log.split("\n"):
             if self.feed(line):
                 break

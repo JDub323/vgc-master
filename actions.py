@@ -30,6 +30,8 @@ PASS = 0
 
 @dataclass(frozen=True)
 class SlotAction:
+    """One slot's semantic action; integer encoding is handled separately."""
+
     kind: str            # "pass" | "move" | "switch"
     move_slot: int = 0   # 0..3
     target: int = T_AUTO
@@ -38,6 +40,7 @@ class SlotAction:
 
 
 def to_index(a: SlotAction) -> int:
+    """Encode a ``SlotAction`` as its stable integer label in ``0..38``."""
     if a.kind == "pass":
         return PASS
     if a.kind == "move":
@@ -46,6 +49,7 @@ def to_index(a: SlotAction) -> int:
 
 
 def from_index(i: int) -> SlotAction:
+    """Decode one stable slot label in ``0..38`` to a ``SlotAction``."""
     if i == PASS:
         return SlotAction("pass")
     if i <= N_MOVES * N_TARGETS * 2:
@@ -55,7 +59,7 @@ def from_index(i: int) -> SlotAction:
 
 
 def joint_ok(a: SlotAction, b: SlotAction) -> bool:
-    """Combos a factorized policy can propose but the game forbids."""
+    """Joint combinations that are illegal in every position."""
     if a.kind == "move" and b.kind == "move" and a.mega and b.mega:
         return False  # one mega per side per battle
     if a.kind == "switch" and b.kind == "switch" and a.switch_to == b.switch_to:
@@ -67,6 +71,7 @@ N_JOINT_ACTIONS = N_SLOT_ACTIONS * N_SLOT_ACTIONS  # 1521
 
 
 def joint_index(a: SlotAction, b: SlotAction) -> int:
+    """Flatten two slot actions to the model's joint label in ``0..1520``."""
     return to_index(a) * N_SLOT_ACTIONS + to_index(b)
 
 
@@ -105,6 +110,7 @@ def _choice(a: SlotAction, slot: int, party_pos_of_team_idx) -> str:
 
 
 def to_choice_string(joint, party_pos_of_team_idx) -> str:
+    """Convert a ``JointAction`` to one comma-separated Showdown choice."""
     a, b = joint
     return f"{_choice(a, 0, party_pos_of_team_idx)}, {_choice(b, 1, party_pos_of_team_idx)}"
 
@@ -151,6 +157,7 @@ def legal_slot_actions(request: dict, slot: int, team_idx_of_party_pos) -> list:
 
 
 def legal_joint_actions(request: dict, team_idx_of_party_pos) -> list:
+    """Return every position-legal ``(slot_a, slot_b)`` action pair."""
     a_acts = legal_slot_actions(request, 0, team_idx_of_party_pos)
     b_acts = legal_slot_actions(request, 1, team_idx_of_party_pos)
     return [(a, b) for a in a_acts for b in b_acts if joint_ok(a, b)]

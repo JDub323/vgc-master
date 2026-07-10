@@ -691,10 +691,12 @@ def export_text(sets) -> str:
 
 
 def get(name) -> list:
+    """Parse and return a fresh full-set list for registered team ``name``."""
     return parse_export(TEAMS[name][1])
 
 
 def menu() -> list:
+    """Return ``[(team_name, archetype_description), ...]``."""
     return [(name, arch) for name, (arch, _) in TEAMS.items()]
 
 

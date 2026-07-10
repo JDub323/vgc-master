@@ -21,10 +21,11 @@ Per move decision:
   5. Aggregate root visit counts across determinizations: that distribution
      IS the output mixed strategy. Play samples from it with temperature.
 
-Known v1 approximations (all documented in the README): reconstruction drops
-volatiles (choice lock, Protect streak, encore, PP spent), forced switch-ins
-inside simulations are random, and within a determinization the simulated
-opponent 'sees' our true sets (standard determinization paranoia).
+Known v1 approximations (all documented in the README): reconstruction restores
+the public Protect streak but drops other volatiles (choice lock, encore,
+PP spent), forced switch-ins inside simulations are random, and within a
+determinization the simulated opponent 'sees' our true sets (standard
+determinization paranoia).
 """
 
 import copy
@@ -35,12 +36,16 @@ from collections import Counter
 import numpy as np
 
 from actions import (T_ALLY, T_AUTO, T_FOE_A, T_FOE_B, joint_index,
-                     legal_joint_actions, to_choice_string, to_index)
-from beliefs import determinized
+                     legal_joint_actions, to_choice_string)
+from agents.encoding.v1 import TokenPositionEncoder
+from agents.evaluators.v1 import PolicyValueLeafEvaluator
+from agents.priors.v1 import PolicyValuePrior
+from agents.search.v1 import DecoupledUCTSearcher
+from beliefs import OpponentBelief, determinized
 from config import CFG
-from damage import DamageBridge, damage_features
+from damage import DamageBridge
 from data import LogParser, Side, sid
-from env import Sidecar, SidecarBattle, full_set, random_choice, reconstruct
+from env import Sidecar, full_set, reconstruct
 from search.debug import SearchDebug, belief_report, root_table
 from search.node import Node
 
@@ -83,14 +88,7 @@ def _joint_priors(joint_dist, joints, k):
     see policy_value.predict_batch) -> normalized priors over legal joints,
     optionally pruned to the top-k (k=None in solve mode: exactness beats
     pruning when the branching is already small)."""
-    p = np.array([joint_dist[joint_index(a, b)] for a, b in joints],
-                 dtype=np.float64)
-    p = p / p.sum() if p.sum() > 0 else np.full(len(joints), 1.0 / len(joints))
-    if k and len(joints) > k:
-        keep = np.argsort(-p)[:k]
-        joints = [joints[i] for i in keep]
-        p = p[keep] / p[keep].sum()
-    return p, joints
+    return PolicyValuePrior().legal_priors(joint_dist, joints, k)
 
 
 class DetGame:
@@ -100,6 +98,7 @@ class DetGame:
 
     def __init__(self, searcher, tracker, opp_sample, my_id, my_request,
                  my_brought, opp_brought, solve):
+        """Reconstruct one sampled hidden team and create its evaluated root."""
         cfg = searcher.cfg
         self.my = my_id
         self.opp = "p2" if my_id == "p1" else "p1"
@@ -153,7 +152,19 @@ class DetGame:
 
 
 class Searcher:
-    def __init__(self, model, tok, cfg=CFG, seed=0, debug=False, sidecar=None):
+    """Compatibility name for the v1 determinized DUCT chooser.
+
+    New archives use the algorithmic
+    ``agents.determinized_duct.v1.DeterminizedDUCTChooser`` implementation ID.
+    This class remains import-compatible for existing callers and old
+    ``search_impl`` archives while delegating swappable work to versioned
+    bricks.
+    """
+
+    def __init__(self, model, tok, cfg=CFG, seed=0, debug=False, sidecar=None,
+                 position_encoder=None, policy_prior=None,
+                 leaf_evaluator=None, searcher=None):
+        """Inject or create the v1 bricks and owned simulator/calc resources."""
         self.model, self.tok, self.cfg = model, tok, cfg
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)
@@ -164,6 +175,15 @@ class Searcher:
         self._own_sc = sidecar is None
         self.sc = Sidecar(cfg) if sidecar is None else sidecar
         self.bridge = DamageBridge(cfg) if cfg.use_damage_features else None
+        self.position_encoder = position_encoder or \
+            TokenPositionEncoder(tok, self.bridge)
+        self.policy_prior = policy_prior or PolicyValuePrior()
+        self.leaf_evaluator = leaf_evaluator or PolicyValueLeafEvaluator(model)
+        self.searcher = searcher or DecoupledUCTSearcher()
+        # The battle/game layer owns this object's lifecycle. Exposing the
+        # expected class lets AgentSpec-loaded games construct the recorded
+        # belief implementation without moving updates inside the chooser.
+        self.belief_model_cls = OpponentBelief
         self.dbg = SearchDebug(debug)
         self.health = Counter()
 
@@ -216,21 +236,11 @@ class Searcher:
                 det.root.my_p = (1 - eps) * det.root.my_p + eps * noise
         if not policy_only:
             budget = max(1, cfg.sims_per_move // len(dets))
-            for det in dets:
-                for _ in range(budget):
-                    self._simulate(det)
+            self.searcher.run(self, dets, budget)
 
         # the aggregated root visit distribution IS the mixed strategy
         # (policy-only: the root priors stand in for visits)
-        acc = {}
-        for det in dets:
-            src = det.root.my_p if policy_only else det.root.my_n
-            for a, n_vis, w in zip(det.root.my_actions, src, det.root.my_w):
-                key = (to_index(a[0]), to_index(a[1]))
-                s = acc.setdefault(key, [a, 0.0, 0.0])
-                s[1] += n_vis
-                s[2] += w
-        strat = sorted(acc.values(), key=lambda s: -s[1])
+        strat = self.searcher.aggregate_root(dets, policy_only)
         visits = np.array([s[1] for s in strat])
         t = cfg.play_temperature if temperature is None else temperature
         if t <= 0:
@@ -270,6 +280,7 @@ class Searcher:
         return strat[pick][0], info
 
     def _debug_print(self, dets, belief, wall, policy_only):
+        """Print phase, health, root, and posterior diagnostics; return ``None``."""
         h = self.health
         sims = int(h["sims"])
         print(f"\n[search debug] {len(dets)} det(s), {sims} sims, {wall:.2f}s"
@@ -296,51 +307,8 @@ class Searcher:
 
     # -- internals -------------------------------------------------------
     def _simulate(self, det):
-        h = self.health
-        h["sims"] += 1
-        with self.dbg("restore"):
-            b = SidecarBattle.restore(self.sc, det.root_state)
-        with self.dbg("copy"):
-            trk = copy.deepcopy(det.seed_tracker)
-        node, path, z = det.root, [], None
-        for _ in range(120):               # endless stall counts as a tie
-            i, j = node.select(self.cfg.c_puct)
-            path.append((node, i, j))
-            h["steps"] += 1
-            with self.dbg("step"):
-                resp = b.step({
-                    det.my: joint_choice(b.requests[det.my], node.my_actions[i],
-                                         det.name_to_idx[det.my]),
-                    det.opp: joint_choice(b.requests[det.opp], node.opp_actions[j],
-                                          det.name_to_idx[det.opp])})
-            for line in resp["log"]:
-                trk.feed(line)
-            if resp["errors"]:             # stored action illegal in THIS rollout
-                h["fallbacks"] += 1
-                with self.dbg("step"):
-                    resp = b.step({s: "default" for s in resp["errors"]})
-                for line in resp["log"]:
-                    trk.feed(line)
-            self._settle(b, trk)
-            if b.ended:
-                h["terminals"] += 1
-                z = {det.my: 1.0, det.opp: -1.0}.get(b.winner, 0.0)
-                break
-            child = node.children.get((i, j))
-            if child is None:
-                child = self._expand(det, b, trk)
-                node.children[(i, j)] = child
-                if not det.solve:          # AlphaZero-style: net value at the leaf,
-                    h["value_leaves"] += 1  # optionally after a few greedy real plies
-                    z = self._leaf_value(det, b, trk, child)
-                    break
-            node = child                   # solve mode: keep going to terminal
-        h["depth_sum"] += len(path)
-        h["depth_max"] = max(h["depth_max"], len(path))
-        with self.dbg("destroy"):
-            b.destroy()
-        for n_, i_, j_ in path:
-            n_.update(i_, j_, z if z is not None else 0.0)
+        """Compatibility hook; new code calls the injected search brick."""
+        return self.searcher.simulate(self, det)
 
     def _leaf_value(self, det, b, trk, leaf):
         """Value backed up from a freshly expanded leaf. With rollout_depth=1
@@ -350,52 +318,15 @@ class Searcher:
         position — so a leaf that only *looks* good because it preserves HP
         (double-Protect) is scored after the opponent's follow-up actually
         happens. A game that ends inside the lookahead returns the true result."""
-        h = self.health
-        node, reached = leaf, 1
-        for _ in range(max(1, self.cfg.rollout_depth) - 1):
-            if b.ended:
-                break
-            i, j = int(np.argmax(node.my_p)), int(np.argmax(node.opp_p))
-            with self.dbg("step"):
-                resp = b.step({
-                    det.my: joint_choice(b.requests[det.my], node.my_actions[i],
-                                         det.name_to_idx[det.my]),
-                    det.opp: joint_choice(b.requests[det.opp], node.opp_actions[j],
-                                          det.name_to_idx[det.opp])})
-            for line in resp["log"]:
-                trk.feed(line)
-            if resp["errors"]:
-                h["fallbacks"] += 1
-                with self.dbg("step"):
-                    resp = b.step({s: "default" for s in resp["errors"]})
-                for line in resp["log"]:
-                    trk.feed(line)
-            self._settle(b, trk)
-            reached += 1
-            if b.ended:
-                break
-            node = self._expand(det, b, trk)
-        h["leaf_depth_sum"] += reached
-        if b.ended:
-            return {det.my: 1.0, det.opp: -1.0}.get(b.winner, 0.0)
-        return node.value
+        return self.searcher.leaf_value(self, det, b, trk, leaf)
 
     def _settle(self, b, trk):
         """Play out forced switches inside a simulation (random legal switch,
         a documented v1 simplification) until both sides face move requests."""
-        while not b.ended:
-            forced = {s: random_choice(b.requests[s], self.rng)
-                      for s in b.pending_sides()
-                      if b.requests[s].get("forceSwitch")}
-            if not forced:
-                return
-            self.health["forced_switches"] += len(forced)
-            with self.dbg("settle"):
-                resp = b.step(forced)
-            for line in resp["log"]:
-                trk.feed(line)
+        return self.searcher.settle(self, b, trk)
 
     def _expand(self, det, b, trk, my_request=None):
+        """Return a new ``Node`` from legal actions, encoded views, and priors."""
         self.health["expands"] += 1
         my_req = my_request or b.requests[det.my]
         opp_req = b.requests[det.opp]
@@ -408,21 +339,35 @@ class Searcher:
                         np.full(len(my_joints), 1.0 / len(my_joints)),
                         np.full(len(opp_joints), 1.0 / len(opp_joints)))
 
-        with self.dbg("views"):
-            state_my, state_opp = trk._view(det.my), trk._view(det.opp)
-            dmg_my = damage_features(state_my, det.bel_opp, self.bridge) \
-                if self.bridge else {}
-            dmg_opp = damage_features(state_opp, det.bel_me, self.bridge) \
-                if self.bridge else {}
-        with self.dbg("encode"):
-            toks = np.stack([self.tok.encode(state_my, det.sum_opp, dmg_my),
-                             self.tok.encode(state_opp, det.sum_my, dmg_opp)])
+        if (hasattr(self.position_encoder, "position") and
+                hasattr(self.position_encoder, "encode_position")):
+            with self.dbg("views"):
+                pos_my = self.position_encoder.position(
+                    trk, det.my, det.bel_opp)
+                pos_opp = self.position_encoder.position(
+                    trk, det.opp, det.bel_me)
+            with self.dbg("encode"):
+                toks = np.stack([
+                    self.position_encoder.encode_position(pos_my, det.sum_opp),
+                    self.position_encoder.encode_position(pos_opp, det.sum_my),
+                ])
+        else:
+            with self.dbg("encode"):
+                toks = np.stack([
+                    self.position_encoder.encode(
+                        trk, det.my, det.bel_opp, det.sum_opp),
+                    self.position_encoder.encode(
+                        trk, det.opp, det.bel_me, det.sum_my),
+                ])
         with self.dbg("net"):
-            dists, values, _ = self.model.predict_batch(toks)
+            dists, values, _ = self.leaf_evaluator.predict_batch(toks)
         k = None if det.solve else self.cfg.top_k_actions
-        my_p, my_joints = _joint_priors(dists[0], my_joints, k)
-        opp_p, opp_joints = _joint_priors(dists[1], opp_joints, k)
-        return Node(my_joints, opp_joints, my_p, opp_p, float(values[0]))
+        my_p, my_joints = self.policy_prior.legal_priors(
+            dists[0], my_joints, k)
+        opp_p, opp_joints = self.policy_prior.legal_priors(
+            dists[1], opp_joints, k)
+        return Node(my_joints, opp_joints, my_p, opp_p,
+                    self.leaf_evaluator.value(values, 0))
 
     def _describe(self, tracker, side_id, joint):
         """Human-readable joint action, e.g. 'suckerpunch>1, sw garchomp'."""

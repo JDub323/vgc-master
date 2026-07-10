@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "agent_impl": "agents.random.v1.RandomChooser",
+  "architecture": "RandomChooser",
+  "config": "config.json",
+  "bricks": {},
+  "assets": {},
+  "runtime": {},
+  "source": {"fixture": true},
+  "archive": {"name": "tiny-random-v1"}
+}

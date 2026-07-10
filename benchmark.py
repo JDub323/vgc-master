@@ -1,7 +1,10 @@
-"""Model-vs-model benchmarking with immutable archived snapshots.
+"""Full-agent benchmarking with immutable archived snapshots.
 
-An *archive* is a frozen, self-contained bundle — checkpoint + vocab.json +
-config + metadata + behavior assets — in artifacts/benchmarks/<name>/.
+An *archive* is a frozen, behavior-asset-complete bundle — checkpoint +
+vocab.json + config + metadata + behavior assets — in
+artifacts/benchmarks/<name>/. It still requires the recorded retained Python
+source and external runtime identities; loading verifies both rather than
+silently substituting current behavior.
 Bundles are never modified or deleted; each records the git commit, the search
 implementation id, and an "era" hash of the search/particle config, so results
 across logic changes are flagged instead of silently mixed. Archive the current
@@ -13,9 +16,9 @@ teams (10 teams -> 100 games, mirrors included): contestant A plays team i,
 B plays team j, for all (i, j). Both orders occur, so no team assignment
 favors a side; p1/p2 alternates by game parity. Each archived contestant loads
 its own model architecture, tokenizer layout, search/belief cfg, and archived
-usage/dex/spread assets when available. The Python Searcher implementation is
-still the current imported code unless/until legacy search modules are added;
-the search_impl id makes that boundary explicit.
+usage/dex/spread assets. New bundles also carry an AgentSpec whose versioned
+chooser and brick IDs are resolved through an explicit registry; old bundles
+without one retain their legacy search_impl compatibility path.
 
 CLI: python benchmark.py archive <name> [--ckpt path] [--notes "..."]
      python benchmark.py rename <old> <new>
@@ -39,6 +42,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import platform
 import random
 import shutil
 import subprocess
@@ -48,8 +52,14 @@ import time
 from datetime import date
 
 import torch
+import numpy as np
 
 import teams as teams_mod
+from agents.ids import DETERMINIZED_DUCT_V1, LEGACY_SEARCH_V1
+from agents.registry import (build_agent, implementation_source_hashes,
+                             verify_implementation_sources)
+from agents.spec import (AGENT_SPEC_FILENAME, AgentSpec,
+                         config_from_agent_spec, default_duct_spec)
 from config import (CFG, config_diff, config_from_snapshot, config_snapshot,
                     load_config_snapshot)
 from env import Sidecar, SidecarBattle, pack_team, random_choice
@@ -67,17 +77,20 @@ ERA_FIELDS = ("n_particles", "resample_floor", "damage_tolerance",
               "spreads_any_weight", "factored_fallback", "top_k_actions",
               "n_determinizations", "solve_endgame_at", "c_puct",
               "rollout_depth", "format_id")
-SEARCH_IMPL = "search.mcts.Searcher/current-python-v1"
+SEARCH_IMPL = LEGACY_SEARCH_V1
+AGENT_IMPL = DETERMINIZED_DUCT_V1
 ARCHIVE_ASSETS = ("usage_stats.json", "dex.json", "spreads.json")
 SEARCHERS = {SEARCH_IMPL: Searcher}
 
 
 def era_hash(cfg=CFG):
+    """Return the ten-hex behavior-era hash for the configured Elo fields."""
     blob = json.dumps({f: str(getattr(cfg, f)) for f in ERA_FIELDS})
     return hashlib.sha1(blob.encode()).hexdigest()[:10]
 
 
 def git_commit():
+    """Return the current short Git commit, or an empty string on failure."""
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                               capture_output=True, text=True, timeout=10,
@@ -86,20 +99,65 @@ def git_commit():
         return ""
 
 
+def git_dirty():
+    """Return whether tracked/untracked worktree changes are present."""
+    try:
+        return bool(subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            timeout=10, cwd=str(CFG.artifacts_dir.parent)).stdout.strip())
+    except OSError:
+        return True
+
+
+def runtime_identities(cfg=CFG):
+    """External identities that can affect an archived battle decision."""
+    package = cfg.node_dir / "package.json"
+    lock = cfg.node_dir / "package-lock.json"
+    deps, packages = {}, {}
+    if package.exists():
+        deps = json.loads(package.read_text()).get("dependencies", {})
+    if lock.exists():
+        packages = json.loads(lock.read_text()).get("packages", {})
+    calc = packages.get("node_modules/@smogon/calc", {})
+    showdown = packages.get("node_modules/pokemon-showdown", {})
+    return {
+        "format_id": cfg.format_id,
+        "pokemon_showdown": {
+            "requested": deps.get("pokemon-showdown", ""),
+            "version": showdown.get("version", ""),
+            "resolved": showdown.get("resolved", ""),
+            "integrity": showdown.get("integrity", ""),
+        },
+        "smogon_calc": {
+            "requested": deps.get("@smogon/calc", ""),
+            "version": calc.get("version", ""),
+            "resolved": calc.get("resolved", ""),
+            "integrity": calc.get("integrity", ""),
+        },
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+    }
+
+
 def bench_dir(cfg=CFG):
+    """Return ``cfg.artifacts_dir / 'benchmarks'``."""
     return cfg.artifacts_dir / "benchmarks"
 
 
 def registry_path(cfg=CFG):
+    """Return the benchmark result-registry JSON path."""
     return bench_dir(cfg) / "registry.json"
 
 
 def load_registry(cfg=CFG):
+    """Return decoded results registry or ``{'results': []}`` when absent."""
     p = registry_path(cfg)
     return json.loads(p.read_text()) if p.exists() else {"results": []}
 
 
 def save_registry(reg, cfg=CFG):
+    """Serialize a result-registry mapping to its configured path."""
     registry_path(cfg).write_text(json.dumps(reg, indent=1))
 
 
@@ -108,10 +166,18 @@ def save_registry(reg, cfg=CFG):
 # ---------------------------------------------------------------------------
 
 def archive(name, ckpt=None, notes="", cfg=CFG):
+    """Create one immutable full-agent bundle; return ``None`` or raise."""
     dst = bench_dir(cfg) / name
     assert not dst.exists(), f"bundle '{name}' already exists — bundles are " \
         "immutable; pick a new name"
     src_ckpt = ckpt or cfg.checkpoint_dir / "ckpt_best.pt"
+    required = [src_ckpt, cfg.artifacts_dir / "vocab.json"]
+    required += [cfg.artifacts_dir / asset for asset in ARCHIVE_ASSETS]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "cannot create a static agent archive; missing behavior assets: "
+            + ", ".join(missing))
     dst.mkdir(parents=True)
     shutil.copy2(src_ckpt, dst / "ckpt.pt")
     shutil.copy2(cfg.artifacts_dir / "vocab.json", dst / "vocab.json")
@@ -125,11 +191,26 @@ def archive(name, ckpt=None, notes="", cfg=CFG):
     snap = ck.get("cfg") or config_snapshot(cfg)
     archive_cfg = config_from_snapshot(snap, base=cfg)
     (dst / "config.json").write_text(json.dumps(snap, indent=1))
+    commit = git_commit()
+    spec = default_duct_spec(
+        archive_cfg,
+        runtime=runtime_identities(cfg),
+        source={"git_commit": commit, "git_dirty": git_dirty()},
+        archive={"name": name, "created": date.today().isoformat(),
+                 "notes": notes, "source_checkpoint": str(src_ckpt)},
+    )
+    spec = dataclasses.replace(
+        spec, source=dict(spec.source) |
+        {"files": implementation_source_hashes(spec)})
+    spec.dump(dst / AGENT_SPEC_FILENAME)
     (dst / "meta.json").write_text(json.dumps({
         "name": name, "created": date.today().isoformat(),
-        "source_ckpt": str(src_ckpt), "git": git_commit(),
+        "source_ckpt": str(src_ckpt), "git": commit,
         "era": era_hash(archive_cfg), "notes": notes,
         "search_impl": SEARCH_IMPL,
+        "agent_impl": spec.agent_impl,
+        "architecture": spec.architecture,
+        "agent_spec": AGENT_SPEC_FILENAME,
         "policy_head": hp.get("policy_head", "slot"),
         "n_tokens": hp["n_tokens"],
         "layout": json.loads((dst / "vocab.json").read_text()).get("layout", 1),
@@ -148,6 +229,11 @@ def rename(old, new, cfg=CFG):
     meta = json.loads((dst / "meta.json").read_text())
     meta["name"] = new
     (dst / "meta.json").write_text(json.dumps(meta, indent=1))
+    spec_path = dst / AGENT_SPEC_FILENAME
+    if spec_path.exists():
+        spec_data = json.loads(spec_path.read_text())
+        spec_data.setdefault("archive", {})["name"] = new
+        spec_path.write_text(json.dumps(spec_data, indent=2) + "\n")
     reg = load_registry(cfg)
     migrated = 0
     for r in reg["results"]:
@@ -160,6 +246,7 @@ def rename(old, new, cfg=CFG):
 
 
 def list_bundles(cfg=CFG):
+    """Print every archive directory containing ``meta.json``."""
     cur_era = era_hash(cfg)
     rows = []
     if bench_dir(cfg).exists():
@@ -170,12 +257,14 @@ def list_bundles(cfg=CFG):
         print("no archived bundles — `python benchmark.py archive <name>` "
               "before changing layouts/logic")
         return
-    print(f"{'name':16s} {'created':11s} {'head':6s} {'tokens':7s} "
-          f"{'era':11s} notes")
+    print(f"{'name':16s} {'architecture':26s} {'created':11s} {'head':6s} "
+          f"{'tokens':7s} {'era':11s} notes")
     for m in rows:
         era = m["era"] + ("" if m["era"] == cur_era else " (old!)")
-        print(f"{m['name']:16s} {m['created']:11s} {m['policy_head']:6s} "
-              f"{m['n_tokens']:<7d} {era:11s} {m.get('notes', '')}")
+        arch = m.get("architecture", "legacy Searcher")
+        print(f"{m['name']:16s} {arch:26.26s} {m['created']:11s} "
+              f"{m['policy_head']:6s} {m['n_tokens']:<7d} {era:11s} "
+              f"{m.get('notes', '')}")
 
 
 # ---------------------------------------------------------------------------
@@ -183,41 +272,102 @@ def list_bundles(cfg=CFG):
 # ---------------------------------------------------------------------------
 
 class Contestant:
-    """A frozen model/tokenizer pair plus its archived behavior config.
-
-    The Python Searcher implementation is still the current imported module.
-    The cfg knobs and archived behavior assets are per-contestant when present.
-    """
+    """A complete frozen chooser specification plus its loaded neural assets."""
 
     def __init__(self, name, cfg=CFG, device="cpu"):
+        """Load ``current`` or one named legacy/static archive for inference."""
         self.name = name
         if name == "current":
             ckpt, vocab = cfg.checkpoint_dir / "ckpt_best.pt", None
-            self.meta = {"era": era_hash(cfg), "git": git_commit()}
+            self.agent_spec = default_duct_spec(
+                cfg, runtime=runtime_identities(cfg),
+                source={"git_commit": git_commit(), "git_dirty": git_dirty()})
+            self.meta = {
+                "era": era_hash(cfg), "git": git_commit(),
+                "agent_impl": self.agent_spec.agent_impl,
+                "architecture": self.agent_spec.architecture,
+            }
             self.bundle_dir = None
             self.archive_cfg = cfg
+            self.static_spec = False
         else:
             d = bench_dir(cfg) / name
             assert d.exists(), f"no bundle '{name}' (see benchmark.py list)"
-            ckpt, vocab = d / "ckpt.pt", d / "vocab.json"
             self.meta = json.loads((d / "meta.json").read_text())
             self.bundle_dir = d
-            self.archive_cfg = load_config_snapshot(d / "config.json", base=cfg)
-        self.model_cfg = _runtime_cfg(self.archive_cfg, cfg, self.bundle_dir)
+            spec_path = d / self.meta.get("agent_spec", AGENT_SPEC_FILENAME)
+            self.static_spec = spec_path.exists()
+            if self.static_spec:
+                self.agent_spec = AgentSpec.load(spec_path)
+                missing = sorted(
+                    path for path in self.agent_spec.behavior_paths()
+                    if not self.agent_spec.resolve(d, path).exists())
+                if missing:
+                    raise FileNotFoundError(
+                        f"{name}: static archive is incomplete: {missing}")
+                from agents.registry import REGISTRY
+                REGISTRY.validate(self.agent_spec)
+                verify_implementation_sources(self.agent_spec)
+                cfg_path = self.agent_spec.resolve(d, self.agent_spec.config)
+                self.archive_cfg = load_config_snapshot(cfg_path, base=cfg)
+                self.archive_cfg = config_from_agent_spec(
+                    self.archive_cfg, self.agent_spec)
+                ckpt = self.agent_spec.resolve(
+                    d, self.agent_spec.assets["checkpoint"])
+                vocab = self.agent_spec.resolve(
+                    d, self.agent_spec.assets["vocab"])
+                _verify_runtime(self.agent_spec, cfg)
+            else:
+                # Old checkpoint-only archives retain their conservative
+                # search_impl dispatch and global-asset fallback.
+                self.agent_spec = None
+                ckpt, vocab = d / "ckpt.pt", d / "vocab.json"
+                self.archive_cfg = load_config_snapshot(
+                    d / "config.json", base=cfg)
+        self.model_cfg = _runtime_cfg(
+            self.archive_cfg, cfg, self.bundle_dir,
+            strict_archive=self.static_spec)
         self.model = PolicyValueNet.load(ckpt, self.model_cfg, device)
         self.tok = PositionTokenizer.load(self.model_cfg, path=vocab)
         self.search_cfg = self.model_cfg
-        self.usage = _load_usage(self.search_cfg, cfg)
+        self.usage = _load_usage(
+            self.search_cfg, cfg, strict_archive=self.static_spec)
         assert self.model.hp["n_tokens"] == self.tok.n_tokens, \
             f"{name}: checkpoint/vocab layout mismatch"
 
 
-def _runtime_cfg(saved_cfg, current_cfg, bundle_dir=None):
+def _verify_runtime(spec, current_cfg):
+    """Refuse to silently run a static archive on a different engine stack."""
+    expected = spec.runtime
+    if not expected:
+        return
+    current = runtime_identities(current_cfg)
+    mismatches = []
+    for key in ("format_id", "python", "torch", "numpy"):
+        if expected.get(key) and expected[key] != current.get(key):
+            mismatches.append(f"{key}: {expected[key]} != {current.get(key)}")
+    for package in ("pokemon_showdown", "smogon_calc"):
+        for key in ("requested", "version", "resolved", "integrity"):
+            want = expected.get(package, {}).get(key)
+            got = current.get(package, {}).get(key)
+            if want and want != got:
+                mismatches.append(f"{package}.{key}: {want} != {got}")
+    if mismatches:
+        raise RuntimeError(
+            "archived runtime identity does not match this installation: "
+            + "; ".join(mismatches))
+
+
+def _runtime_cfg(saved_cfg, current_cfg, bundle_dir=None,
+                 strict_archive=False):
     """Use saved behavior knobs with current machine paths where needed."""
     frozen_assets = bundle_dir and (bundle_dir / "usage_stats.json").exists() \
         and (bundle_dir / "dex.json").exists() \
         and (not getattr(saved_cfg, "spreads_prior", True)
              or (bundle_dir / "spreads.json").exists())
+    if strict_archive and not frozen_assets:
+        raise FileNotFoundError(
+            f"static archive {bundle_dir} is missing required behavior assets")
     artifacts_dir = bundle_dir if frozen_assets else current_cfg.artifacts_dir
     return dataclasses.replace(
         saved_cfg,
@@ -231,14 +381,18 @@ def _runtime_cfg(saved_cfg, current_cfg, bundle_dir=None):
     )
 
 
-def _load_usage(search_cfg, current_cfg):
+def _load_usage(search_cfg, current_cfg, strict_archive=False):
+    """Return decoded usage stats, forbidding fallback for static archives."""
     p = search_cfg.artifacts_dir / "usage_stats.json"
-    if not p.exists():
+    if not p.exists() and not strict_archive:
         p = current_cfg.artifacts_dir / "usage_stats.json"
+    if not p.exists():
+        raise FileNotFoundError(f"missing archived usage stats: {p}")
     return json.loads(p.read_text())
 
 
 def _with_runtime_overrides(saved_cfg, current_cfg, sims=None, depth=None):
+    """Return saved behavior config with explicit run/machine overrides."""
     return dataclasses.replace(
         saved_cfg,
         sims_per_move=sims or saved_cfg.sims_per_move,
@@ -249,12 +403,13 @@ def _with_runtime_overrides(saved_cfg, current_cfg, sims=None, depth=None):
 
 
 def _print_cfg_diffs(a, b, current_cfg):
+    """Print implementation and meaningful behavior/model config differences."""
     fields = ERA_FIELDS + MODEL_CFG_FIELDS
     diffs = config_diff(a.search_cfg, b.search_cfg, fields=fields)
     cur_a = config_diff(current_cfg, a.search_cfg, fields=fields)
     cur_b = config_diff(current_cfg, b.search_cfg, fields=fields)
-    print(f"  search impl: {a.meta.get('search_impl', 'unknown')} vs "
-          f"{b.meta.get('search_impl', 'unknown')} (running {SEARCH_IMPL})")
+    print(f"  agent impl: {a.meta.get('agent_impl', a.meta.get('search_impl', 'unknown'))} "
+          f"vs {b.meta.get('agent_impl', b.meta.get('search_impl', 'unknown'))}")
     if diffs:
         print("  archived cfg differences:")
         for name, va, vb in diffs:
@@ -270,8 +425,18 @@ def _print_cfg_diffs(a, b, current_cfg):
 
 
 def _make_searcher(contestant, run_cfg):
+    """Construct the exact registered chooser required by ``contestant``."""
+    if contestant.agent_spec is not None:
+        return build_agent(
+            contestant.agent_spec, model=contestant.model,
+            tokenizer=contestant.tok, cfg=run_cfg, apply_spec_config=False)
     impl = contestant.meta.get("search_impl") or SEARCH_IMPL
-    cls = SEARCHERS.get(impl, Searcher)
+    try:
+        cls = SEARCHERS[impl]
+    except KeyError as exc:
+        raise KeyError(
+            f"archive requires unavailable legacy search implementation: {impl}") \
+            from exc
     return cls(contestant.model, contestant.tok, run_cfg)
 
 
@@ -416,7 +581,15 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                        "era_run_a": era_hash(cfg_a),
                        "era_run_b": era_hash(cfg_b),
                        "git": git_commit(),
-                       "search_impl": SEARCH_IMPL}
+                       "search_impl": SEARCH_IMPL,
+                       "agent_impl_a": A.meta.get(
+                           "agent_impl", A.meta.get("search_impl", SEARCH_IMPL)),
+                       "agent_impl_b": B.meta.get(
+                           "agent_impl", B.meta.get("search_impl", SEARCH_IMPL)),
+                       "architecture_a": A.meta.get(
+                           "architecture", "legacy Searcher"),
+                       "architecture_b": B.meta.get(
+                           "architecture", "legacy Searcher")}
                 with jobs_lock:
                     results.append(res)
                     if verbose:
@@ -447,6 +620,7 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
 
 
 def report(name_a, name_b, results):
+    """Print aggregate score, confidence/Elo interval, and per-team split."""
     n = len(results)
     wa = sum(r["winner"] == "a" for r in results)
     wb = sum(r["winner"] == "b" for r in results)
@@ -470,6 +644,7 @@ def report(name_a, name_b, results):
 
 
 def wilson(w, n, z=1.96):
+    """Return a Wilson ``(lower, upper)`` interval for fractional successes."""
     if n == 0:
         return 0.0, 1.0
     p = w / n
@@ -480,6 +655,7 @@ def wilson(w, n, z=1.96):
 
 
 def elo_diff(score):
+    """Convert a score fraction to a clipped logistic Elo difference."""
     s = min(0.99, max(0.01, score))
     return 400 * math.log10(s / (1 - s))
 
@@ -513,16 +689,25 @@ def standings(cfg=CFG):
                     rating[p] = max(num / den, 1e-9)
             m = sum(rating.values()) / len(rating)
             rating = {p: v / m for p, v in rating.items()}
+        family = {}
+        for row in rows:
+            family.setdefault(row["a"], row.get("architecture_a", "legacy Searcher"))
+            family.setdefault(row["b"], row.get("architecture_b", "legacy Searcher"))
         print(f"\nera {era} ({len(rows)} games):")
-        for p in sorted(players, key=lambda p: -rating[p]):
-            games = sum(wins[p].values()) + sum(wins[q][p] for q in players)
-            print(f"  {1500 + 400 * math.log10(rating[p]):7.0f}  {p}"
-                  f"  ({games:.0f} games)")
+        for architecture in sorted(set(family.values())):
+            print(f"  {architecture}:")
+            members = [p for p in players if family[p] == architecture]
+            for p in sorted(members, key=lambda p: -rating[p]):
+                games = sum(wins[p].values()) + sum(
+                    wins[q][p] for q in players)
+                print(f"    {1500 + 400 * math.log10(rating[p]):7.0f}  {p}"
+                      f"  ({games:.0f} games)")
 
 
 # ---------------------------------------------------------------------------
 
 def main(cfg=CFG):
+    """Dispatch archive/list/rename/play/standings from ``sys.argv``."""
     args = sys.argv[1:]
     if not args:
         print(__doc__)

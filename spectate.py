@@ -42,6 +42,7 @@ def resolve_public(lines):
 
 
 def _slug(s):
+    """Return a lowercase filesystem-safe slug."""
     return re.sub(r"[^a-z0-9._-]+", "-", str(s).lower()).strip("-")
 
 
@@ -102,10 +103,12 @@ class GameFeed:
     tracks turn/result for the dashboard, and saves files on finish."""
 
     def __init__(self, spectator, gid, meta):
+        """Bind parent spectator, integer game id, and mutable metadata mapping."""
         self.sp, self.gid, self.meta = spectator, gid, meta
         self.raw = []
 
     def feed(self, raw_lines):
+        """Append protocol strings and update turn/status; return ``None``."""
         if not raw_lines:
             return
         with self.sp.lock:
@@ -117,6 +120,7 @@ class GameFeed:
                     self.meta["status"] = "done"
 
     def finish(self, winner_side):
+        """Finalize winner metadata and optionally write replay files."""
         side_of = self.meta["side_of"]                 # {'a':'p1','b':'p2'}
         who = {v: k for k, v in side_of.items()}       # {'p1':'a','p2':'b'}
         res = who.get(winner_side, "tie")
@@ -140,12 +144,16 @@ class GameFeed:
         write_replay(stem, pub, header, f"local-{self.gid:03d}")
 
     def public_lines(self):
+        """Return a locked public-only copy of accumulated protocol lines."""
         with self.sp.lock:
             return resolve_public(self.raw)
 
 
 class Spectator:
+    """Thread-safe multi-game live dashboard and replay coordinator."""
+
     def __init__(self, run_name, cfg=CFG, live=False, port=8020, save=True):
+        """Configure output/live server and initialize feed registries."""
         self.dir = cfg.artifacts_dir / "replays" / _slug(run_name)
         self.run_name = run_name
         self.save = save
@@ -160,6 +168,7 @@ class Spectator:
             self._start(port)
 
     def new_game(self, a, b, team_a, team_b, side_of, fmt):
+        """Create, register, and return a new ``GameFeed``."""
         with self.lock:
             gid = self._next
             self._next += 1
@@ -173,6 +182,7 @@ class Spectator:
 
     # -- dashboard ----------------------------------------------------------
     def _start(self, port):
+        """Start the daemon spectator HTTP server; return ``None``."""
         sp = self
 
         class H(BaseHTTPRequestHandler):

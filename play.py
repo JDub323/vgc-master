@@ -32,85 +32,14 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import teams as teams_lib
-from actions import (T_FOE_A, T_FOE_B, joint_ok, legal_joint_actions,
-                     legal_slot_actions)
+from agents.max_damage.v1 import MaxDamageChooser
+from agents.policy_only.v1 import PolicyOnlyChooser
+from agents.random.v1 import RandomChooser
 from config import CFG
 from env import make_live_player
 from search.debug import belief_data
 
-# ---------------------------------------------------------------------------
-# alternative bots: same .choose interface as the Searcher
-# ---------------------------------------------------------------------------
-
-
-class PolicyChooser:
-    """The net's root priors, no simulations — fast and beatable."""
-
-    def __init__(self, searcher):
-        self.searcher, self.bridge = searcher, searcher.bridge
-
-    def choose(self, *args, **kwargs):
-        return self.searcher.choose(*args, policy_only=True, **kwargs)
-
-
-class RandomChooser:
-    bridge = None
-
-    def __init__(self, rng=None):
-        self.rng = rng or random.Random()
-
-    def choose(self, tracker, belief, my_id, req, brought, **kwargs):
-        from search.mcts import _pos_maps
-        name_to_idx = {m.set["name"]: m.team_idx
-                       for m in tracker.sides[my_id].mons}
-        joints = legal_joint_actions(req, _pos_maps(req, name_to_idx)[0])
-        return self.rng.choice(joints), _info("uniform random", 0.0)
-
-
-class MaxDamageChooser:
-    """Per slot, the (move, target) with the highest expected damage against
-    the belief filter's most likely sets. The classic greedy floor."""
-
-    def __init__(self, cfg=CFG):
-        from damage import DamageBridge
-        self.bridge = DamageBridge(cfg)
-
-    def choose(self, tracker, belief, my_id, req, brought, **kwargs):
-        from damage import damage_features
-        from search.mcts import _pos_maps
-        opp_id = "p2" if my_id == "p1" else "p1"
-        view = tracker._view(my_id)
-        dmg = damage_features(view, belief, self.bridge)
-        name_to_idx = {m.set["name"]: m.team_idx
-                       for m in tracker.sides[my_id].mons}
-        idx_of_pos = _pos_maps(req, name_to_idx)[0]
-        opp_at = {m.active_slot: m.team_idx
-                  for m in tracker.sides[opp_id].mons
-                  if m.active_slot is not None and not m.fainted}
-        picks = []
-        for slot in (0, 1):
-            acts = legal_slot_actions(req, slot, idx_of_pos)
-            me = tracker.sides[my_id].active(slot)
-            best, best_v = acts[0], -1.0
-            for a in acts:
-                if a.kind != "move" or me is None:
-                    continue
-                tgt = {T_FOE_A: 0, T_FOE_B: 1}.get(a.target)
-                if tgt is None or tgt not in opp_at:
-                    continue
-                cell = dmg.get((me.team_idx, a.move_slot, opp_at[tgt]))
-                v = (cell[0] + cell[1]) / 2 if cell else 0.0
-                if v > best_v:
-                    best, best_v = a, v
-            picks.append(best)
-        if not joint_ok(*picks):     # e.g. both defaulted to the same switch
-            picks[1] = next(b for b in acts if joint_ok(picks[0], b))
-        return tuple(picks), _info("max immediate damage", 0.0)
-
-
-def _info(desc, value):
-    return {"value": value, "solve": False, "strategy": [(desc, 1.0)],
-            "q": [], "opp_pred": [], "health": {}}
+PolicyChooser = PolicyOnlyChooser  # backward-compatible import name
 
 
 # ---------------------------------------------------------------------------
@@ -123,10 +52,12 @@ STATE = {"status": "starting...", "turn": 0, "bot": "", "format": "",
 
 
 def _sprite(species_name):
+    """Return the lowercase Showdown sprite slug for a display species."""
     return re.sub(r"[^a-z0-9-]", "", species_name.lower().replace(" ", ""))
 
 
 def on_decision(battle, g, info):
+    """Replace dashboard state from a live game and chooser ``ChoiceInfo``."""
     me = battle.player_role
     you = "p2" if me == "p1" else "p1"
     t = g["tracker"]
@@ -243,6 +174,7 @@ tick();
 
 
 def start_dashboard(port):
+    """Start and return a daemon ``ThreadingHTTPServer`` on ``port``."""
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             body, ctype = (json.dumps(STATE).encode(), "application/json") \
@@ -266,12 +198,14 @@ def start_dashboard(port):
 # ---------------------------------------------------------------------------
 
 def port_open(port):
+    """Return whether localhost accepts a TCP connection on ``port``."""
     with socket.socket() as s:
         s.settimeout(0.3)
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def start_showdown(cfg):
+    """Start the local Showdown server, or return ``None`` if already open."""
     if port_open(cfg.showdown_port):
         print(f"reusing the Showdown server already on :{cfg.showdown_port}")
         return None
@@ -296,6 +230,7 @@ def start_showdown(cfg):
 # ---------------------------------------------------------------------------
 
 def pick(prompt, options):
+    """Prompt until valid and return the selected option's value."""
     for i, (name, note) in enumerate(options):
         print(f"  [{i}] {name:24s} {note}")
     while True:
@@ -311,22 +246,25 @@ BOTS = [("search", "full DUCT search (strongest, slowest)"),
 
 
 def build_chooser(kind, ckpt, cfg, debug):
+    """Return the requested versioned/baseline ``MoveChooser``."""
     if kind == "random":
         return RandomChooser()
     if kind == "max-damage":
         return MaxDamageChooser(cfg)
     import torch
 
+    from agents.determinized_duct.v1 import DeterminizedDUCTChooser
     from models.policy_value import PolicyValueNet
-    from search.mcts import Searcher
     from tokenizer import PositionTokenizer
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    searcher = Searcher(PolicyValueNet.load(ckpt, cfg, device),
-                        PositionTokenizer.load(cfg), cfg, debug=debug)
-    return searcher if kind == "search" else PolicyChooser(searcher)
+    searcher = DeterminizedDUCTChooser(
+        PolicyValueNet.load(ckpt, cfg, device), PositionTokenizer.load(cfg),
+        cfg, debug=debug)
+    return searcher if kind == "search" else PolicyOnlyChooser(searcher)
 
 
 def main(cfg=CFG):
+    """Orchestrate team selection, local server, dashboard, and live games."""
     from poke_env.ps_client import AccountConfiguration, ServerConfiguration
     args = sys.argv[1:]
 

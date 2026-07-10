@@ -21,8 +21,8 @@ probing recent months. Override with env PIKA_FORMAT / PIKA_KEY / PIKA_DATE, or
 edit FORMAT below. No hardcoded per-mon data -- re-run any time to refresh.
 
 Percentages are stored as given (Pikalytics shows a truncated tail that need not
-sum to 100); beliefs.py normalizes on load and folds the missing tail into the
-archetype fallback.
+sum to 100); beliefs.py selects and normalizes its top crossed builds, then
+reserves the configured ``spreads_any_weight`` for the off-list cushion.
 """
 import datetime as dt
 import json
@@ -38,10 +38,12 @@ MAX_SP, TOTAL_SP = 32, 66
 
 
 def _sid(name):
+    """Return lowercase alphanumeric Showdown id."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 def _get(url, timeout=60):
+    """Fetch URL and return decoded UTF-8 response text."""
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
@@ -59,6 +61,7 @@ def discover_key(fmt):
 
 
 def candidate_dates():
+    """Return override or current-to-eight-months-ago ``YYYY-MM`` strings."""
     if os.environ.get("PIKA_DATE"):
         return [os.environ["PIKA_DATE"]]
     today = dt.date.today()
@@ -73,8 +76,11 @@ def candidate_dates():
 
 
 def fetch_format(fmt):
-    """(dataDate, [per-mon dicts]). Probes recent months until the API returns a
-    non-empty list (the API answers a bare 'false' for a date it has no data)."""
+    """Return ``(data_date, discovered_key, per_mon_dicts)``.
+
+    Probes recent months until the API returns a non-empty list (the API
+    answers a bare ``false`` for a date it has no data).
+    """
     key = discover_key(fmt)
     for date in candidate_dates():
         url = f"https://www.pikalytics.com/api/p/{date}/{key}/"
@@ -88,11 +94,13 @@ def fetch_format(fmt):
 
 
 def _parse_ev(s):
+    """Return a valid six-SP list from slash text, otherwise ``None``."""
     v = [int(x) for x in s.split("/")]
     return v if len(v) == 6 and all(0 <= x <= MAX_SP for x in v) and sum(v) <= TOTAL_SP else None
 
 
 def build(cfg=CFG):
+    """Fetch the configured format and write normalized ``spreads.json``."""
     date, key, data = fetch_format(FORMAT)
     out = {"_meta": {"source": "pikalytics.com api /api/p/", "format": FORMAT,
                      "key": key, "data_date": date,

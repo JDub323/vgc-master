@@ -15,16 +15,15 @@ reveals only.
 Outputs: summary() buckets for the tokenizer, sample_sets(k) for search
 determinization, top_particle(k) for the damage feature matrix.
 
-Stat-point spreads: team sheets redact stat training, so each train-split set
-is expanded into low-dimensional SPREAD ARCHETYPES (fast / bulky-physical /
-bulky-special / bulky-attacker / max-offense / mixed — concrete allocations of
-the Champions 66-point system) plus one "any" catch-all that keeps the old
-one-sided bounds. Particles with a concrete spread make speed and damage
-evidence EXACT (the calc runs at that particle's real stats), so move order
-and observed damage discriminate archetypes: a surprisingly fast Kingambit
-kills the bulky variants, an underwhelming hit kills the offensive ones. The
-posterior over archetypes feeds the tokenizer as two belief tokens. General on
-purpose: archetypes, never exact spreads.
+Stat-point spreads: team sheets redact nature and stat training. For a species
+covered by ``artifacts/spreads.json``, each train-split set is crossed with the
+top objective (nature, spread) builds plus an off-list ``any`` cushion. Concrete
+objective builds are tested at their exact Champions stats. The cushion, and
+the hand-built archetype fallback used for uncovered species, instead keep
+feasible attack/speed intervals that move-order and damage evidence narrow;
+defensive evidence stays conservative. Archived tokenizer layout 2 represented
+the archetype posterior directly; current layout 3 represents inferred nature
+from the objective spread prior. Exact hidden SP values never become tokens.
 
 Known blind spot: particles only cover sets seen in the train split, so a
 genuinely novel set (off-meta mon) can kill every particle and force the
@@ -59,6 +58,7 @@ _DEX_CACHE = {}
 
 
 def load_dex(cfg=CFG):
+    """Return cached decoded ``dex.json`` mapping, or ``None`` when absent."""
     p = cfg.artifacts_dir / "dex.json"
     if p not in _DEX_CACHE:
         _DEX_CACHE[p] = json.loads(p.read_text()) if p.exists() else None
@@ -152,11 +152,15 @@ def calc_stat(base, stat, nature, sp=0):
 
 
 def boost_mult(b):
+    """Return the numeric stat multiplier for boost stage ``b``."""
     return (2 + b) / 2 if b >= 0 else 2 / (2 - b)
 
 
 class OpponentBelief:
+    """Externally owned per-battle particle posteriors for opponent sets."""
+
     def __init__(self, opp_species, usage, cfg=CFG, bridge=None, my_team=None):
+        """Construct preview-ordered particles from species ids and usage rows."""
         self.cfg, self.bridge = cfg, bridge
         self.dex = load_dex(cfg)
         self.spreads = load_spreads(cfg) if getattr(cfg, "spreads_prior", True) else None
@@ -309,6 +313,7 @@ class OpponentBelief:
 
     # -- stats -----------------------------------------------------------
     def _base(self, species, stat):
+        """Return one integer base stat from dex, or ``None`` if unavailable."""
         if not self.dex or species not in self.dex["species"]:
             return None
         return self.dex["species"][species]["baseStats"][stat]
@@ -339,6 +344,7 @@ class OpponentBelief:
         return spe
 
     def _my_speed(self, idx, ctx, sp=None):
+        """Return effective speed for a known own-team mon and context."""
         s = self.my_team[idx]
         base = self._base(_sid(s["species"]), "spe")
         if base is None:
@@ -369,6 +375,7 @@ class OpponentBelief:
                    if self.oracle_keyfn(p) == key)
 
     def _apply_list(self, k, mults, cause="?"):
+        """Apply multipliers, normalize, and track any depletion cause."""
         before = self._oracle_mass(k) if self.oracle_keys else None
         new = [wi * m for wi, m in zip(self.weights[k], mults)]
         if sum(new) <= 0:
@@ -390,6 +397,7 @@ class OpponentBelief:
                 self.oracle_kills_by_cause[cause] += 1
 
     def _hard_ok(self, k, p):
+        """Return whether a particle satisfies all hard public reveals."""
         c = self.constraints[k]
         return float(c["moves"] <= set(p["moves"])
                      and (c["item"] is None or p["item"] == c["item"])
@@ -442,6 +450,7 @@ class OpponentBelief:
         return new
 
     def _resample_check(self, k):
+        """Mix prior mass when the alive-particle fraction falls too low."""
         alive = sum(1 for w in self.weights[k] if w > 1e-9)
         if alive / len(self.weights[k]) < self.cfg.resample_floor:
             mixed = [0.9 * w + 0.1 * pr * self._hard_ok(k, p) for w, pr, p in
@@ -451,6 +460,7 @@ class OpponentBelief:
 
     # -- update from one turn's events -------------------------------------
     def update(self, events, viewer):
+        """Consume ``list[BeliefEvent]`` and mutate posterior weights/bands."""
         opp = "p2" if viewer == "p1" else "p1"
         for ev in events:
             if ev[0] == "reveal" and ev[1] == opp:
@@ -477,6 +487,7 @@ class OpponentBelief:
             self._resample_check(k)
 
     def _speed_evidence(self, order, glob, viewer, opp):
+        """Apply one same-priority move-order constraint; return ``None``."""
         if not self.dex:
             return
         pri = {m: self.dex["moves"].get(m, {}).get("priority", 0)
@@ -560,6 +571,7 @@ class OpponentBelief:
         return mults
 
     def _damage_evidence(self, ev, viewer, opp):
+        """Apply one eligible observed-damage constraint; return ``None``."""
         _, atk_side, atk_idx, move, def_side, def_idx, frac, ctx = ev
         if self.bridge is None or frac <= 0 or ctx["crit"] or ctx["spread"] or ctx["multi"]:
             return
@@ -752,6 +764,7 @@ class OpponentBelief:
             calc_stat(bd, key, n, MAX_SP) * calc_stat(bh, "hp", n, MAX_SP))
 
     def _as_attacker(self, k, p, ctx):
+        """Return canonical calc attacker mapping for one particle."""
         return {"species": self._species_cur(k), "level": 50,
                 "item": None if self.constraints[k]["consumed"] else p["item"],
                 "ability": p["ability"], "nature": p["nature"],
@@ -760,6 +773,7 @@ class OpponentBelief:
                 "alliesFainted": ctx.get("allies_fainted")}
 
     def _as_defender(self, k, p, ctx):
+        """Return canonical calc defender mapping for one particle."""
         return {"species": self._species_cur(k), "level": 50,
                 "item": None if self.constraints[k]["consumed"] else p["item"],
                 "ability": p["ability"], "nature": p["nature"],
@@ -767,6 +781,7 @@ class OpponentBelief:
                 "boosts": ctx["def_boosts"]}
 
     def _species_cur(self, k):
+        """Return current inferred species id, applying a revealed mega."""
         sp = self.species[k]
         c = self.constraints[k]
         if not c["mega"]:
@@ -776,6 +791,7 @@ class OpponentBelief:
 
     # -- outputs ------------------------------------------------------------
     def top_particle(self, k):
+        """Return the highest-weight ``ParticleSet`` at team index ``k``."""
         i = max(range(len(self.weights[k])), key=lambda i: self.weights[k][i])
         return self.particles[k][i]
 
@@ -911,6 +927,7 @@ def _feasible_sp_range(results, frac, tol, truncated):
 
 
 def _quantile(sorted_pairs, q):
+    """Return a weighted quantile from ascending ``(value, weight)`` pairs."""
     acc = 0.0
     for v, w in sorted_pairs:
         acc += w
@@ -920,6 +937,7 @@ def _quantile(sorted_pairs, q):
 
 
 def _sid(name):
+    """Return lowercase alphanumeric Showdown id."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
@@ -930,6 +948,7 @@ def _sid(name):
 # ---------------------------------------------------------------------------
 
 def _set_key(s):
+    """Return hashable full hidden-set identity including nature."""
     # team sheets redact stat points, so identity is (moves, item, ability, nature)
     return (tuple(sorted(s["moves"])), s["item"], s["ability"], s["nature"])
 
@@ -944,6 +963,7 @@ def _id_key(s):
 
 
 def audit(max_battles, cfg=CFG):
+    """Print held-out posterior, depletion, and latency metrics."""
     import pickle
     from collections import Counter
 

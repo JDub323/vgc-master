@@ -27,7 +27,8 @@ sp_procs subprocesses (sidestepping the GIL) x sp_workers game threads, and
 every leaf evaluation in every game funnels through one BatchedEvaluator per
 process — a queue that coalesces requests from all threads into single
 batched predict_batch calls. The evaluator quacks like the model (only
-predict_batch is ever called), so the Searcher needs no changes.
+predict_batch is ever called), so the versioned chooser needs no special
+self-play code.
 
 Iteration loop: generate sp_games_per_iter games -> append a shard to the
 replay buffer -> fine-tune on the last sp_buffer_iters shards -> checkpoint ->
@@ -58,21 +59,24 @@ import torch.nn.functional as F
 
 import teams as teams_mod
 from actions import to_index
+from agents.determinized_duct.v1 import DeterminizedDUCTChooser
 from config import CFG
 from damage import damage_features
 from env import Sidecar, SidecarBattle, pack_team, random_choice
 from models.policy_value import PolicyValueNet
 from observe_game import Bot
-from search.mcts import Searcher, joint_choice
+from search.mcts import joint_choice
 from tokenizer import PositionTokenizer
 from train import make_loader
 
 
 def sp_dir(cfg=CFG):
+    """Return the self-play checkpoint directory ``Path``."""
     return cfg.checkpoint_dir / "selfplay"
 
 
 def buffer_dir(cfg=CFG):
+    """Return the self-play replay-buffer directory ``Path``."""
     return sp_dir(cfg) / "buffer"
 
 
@@ -82,10 +86,12 @@ def buffer_dir(cfg=CFG):
 
 class BatchedEvaluator:
     """Coalesces predict_batch calls from many game threads into single GPU
-    batches. Passed to Searcher AS the model — predict_batch is the model's
-    entire inference contract, so nothing in the search knows the difference."""
+    batches. Passed to ``DeterminizedDUCTChooser`` as its model dependency;
+    ``PolicyValueLeafEvaluator`` only calls ``predict_batch``, so search cannot
+    distinguish this queue from a direct ``PolicyValueNet``."""
 
     def __init__(self, model, max_batch=256, wait_ms=2.0):
+        """Start a daemon queue worker around a predict-batch model."""
         self.model = model
         self.q = queue.Queue()
         self.max_batch = max_batch
@@ -94,12 +100,14 @@ class BatchedEvaluator:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def predict_batch(self, tokens):
+        """Synchronously return the standard NumPy ``ModelPrediction`` tuple."""
         ev, out = threading.Event(), {}
         self.q.put((np.asarray(tokens), ev, out))
         ev.wait()
         return out["r"]
 
     def _loop(self):
+        """Forever coalesce queued arrays and fulfill their events in order."""
         while True:
             batch = [self.q.get()]                     # block for the first
             deadline = time.monotonic() + self.wait_s
@@ -134,11 +142,13 @@ class RecorderBot(Bot):
     uses, so self-play samples speak the tokenizer's language."""
 
     def __init__(self, *args, noise=None, **kw):
+        """Initialize ``Bot`` plus optional ``(epsilon,alpha)`` root noise."""
         super().__init__(*args, **kw)
         self.noise = noise
         self.samples = []          # dicts, z filled in at game end
 
     def decide(self, request, temperature):
+        """Return ``(Showdown choice, ChoiceInfo)`` and append one sample."""
         self.belief.update(self.tracker.drain_events(), viewer=self.side)
         joint, info = self.searcher.choose(
             self.tracker, self.belief, self.side, request, self.brought,
@@ -202,6 +212,7 @@ def play_selfplay_game(sc, bots, sets_by_side, cfg, rng, max_turns=300,
 
 
 def oracle_labels(tok, opp_sets):
+    """Map true opponent sets to item/ability/move auxiliary label lists."""
     items = [tok.item_idx(s["item"]) for s in opp_sets]
     abils = [tok.ability_idx(s["ability"]) for s in opp_sets]
     moves = [[tok.move_idx(m) for m in s["moves"]] + [0] * (4 - len(s["moves"]))
@@ -210,6 +221,7 @@ def oracle_labels(tok, opp_sets):
 
 
 def pad6(labels, fill):
+    """Pad/truncate a label list to exactly six entries."""
     return (labels + [fill] * 6)[:6]
 
 
@@ -254,8 +266,8 @@ def generate_games(model, tok, cfg, n_games, workers, seed, verbose=True):
         rng = random.Random((seed << 16) + wid)
         sc = Sidecar(cfg)
         # one shared sidecar for the game AND this worker's search (was 2)
-        searcher = Searcher(evaluator, tok, cfg, seed=(seed << 16) + wid,
-                            sidecar=sc)
+        searcher = DeterminizedDUCTChooser(
+            evaluator, tok, cfg, seed=(seed << 16) + wid, sidecar=sc)
         try:
             while True:
                 with lock:
@@ -324,6 +336,7 @@ class SelfPlayShards(torch.utils.data.Dataset):
     shards (same batched-__getitem__ trick as train.Shards)."""
 
     def __init__(self, cur_iter, cfg=CFG):
+        """Load and concatenate the configured rolling iteration window."""
         lo = max(0, cur_iter - cfg.sp_buffer_iters + 1)
         files = [f for f in sorted(buffer_dir(cfg).glob("sp_*.npz"))
                  if lo <= int(f.stem.split("_")[1]) <= cur_iter]
@@ -333,9 +346,11 @@ class SelfPlayShards(torch.utils.data.Dataset):
                     for k in parts[0].files}
 
     def __len__(self):
+        """Return replay-buffer position count."""
         return len(self.arr["tokens"])
 
     def __getitem__(self, idxs):
+        """Return the seven-tensor sparse-policy self-play batch."""
         a = self.arr
         return (torch.from_numpy(a["tokens"][idxs].astype(np.int64)),
                 torch.from_numpy(a["pol_idx"][idxs].astype(np.int64)),
@@ -370,6 +385,7 @@ def sp_loss(model, batch, cfg=CFG):
 
 
 def train_iteration(model, cur_iter, device, cfg=CFG):
+    """Fine-tune ``model`` in place on the rolling replay buffer; return None."""
     ds = SelfPlayShards(cur_iter, cfg)
     dl = make_loader(ds, cfg.batch_size, True, device, cfg)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.sp_lr,
@@ -416,8 +432,10 @@ def gate(model_new, model_old, tok, cfg, n_games, workers=4):
     def worker(wid):
         sc = Sidecar(cfg)
         # both searchers share the game sidecar (sequential use in one thread)
-        sn = Searcher(model_new, tok, cfg, seed=wid, sidecar=sc)
-        so = Searcher(model_old, tok, cfg, seed=1000 + wid, sidecar=sc)
+        sn = DeterminizedDUCTChooser(
+            model_new, tok, cfg, seed=wid, sidecar=sc)
+        so = DeterminizedDUCTChooser(
+            model_old, tok, cfg, seed=1000 + wid, sidecar=sc)
         try:
             while True:
                 with lock:
@@ -467,6 +485,7 @@ def fork_model(src_ckpt, cfg, device):
 
 
 def main(cfg=CFG):
+    """Run resumable generate/train/gate iterations from config and CLI flags."""
     if len(sys.argv) > 1 and sys.argv[1] == "--_gen":
         _gen_subprocess(cfg)
         return

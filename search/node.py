@@ -20,6 +20,7 @@ class Node:
     each descent), so stats average over chance implicitly — no chance nodes."""
 
     def __init__(self, my_actions, opp_actions, my_priors, opp_priors, value=0.0):
+        """Store action lists and initialize parallel float64 P/N/W arrays."""
         self.my_actions = my_actions        # list of joint (SlotAction, SlotAction)
         self.opp_actions = opp_actions
         self.my_p = np.asarray(my_priors, dtype=np.float64)
@@ -34,6 +35,7 @@ class Node:
 
     @staticmethod
     def _pick(p, n, w, total, c_puct):
+        """Return the integer argmax of zero-FPU PUCT for one player."""
         q = np.where(n > 0, w / np.maximum(n, 1), 0.0)   # unvisited: neutral FPU
         return int(np.argmax(q + c_puct * p * np.sqrt(total + 1) / (1 + n)))
 

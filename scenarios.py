@@ -28,11 +28,12 @@ from dataclasses import replace
 from beliefs import determinized, load_dex
 from config import CFG
 from data import LogParser, Side, sid
-from search.mcts import Searcher
+from agents.determinized_duct.v1 import DeterminizedDUCTChooser
 
 
 def mon(species, moves, item="", ability="", nature="serious", evs=None,
         gender="", level=50):
+    """Return one normalized authored scenario ``PokemonSet`` mapping."""
     return {"name": species, "species": species, "item": item,
             "ability": ability, "moves": list(moves), "nature": nature,
             "evs": evs or [0] * 6, "gender": gender, "level": level}
@@ -199,6 +200,7 @@ SCENARIOS = [
 
 
 def _move_marginals(info, moves):
+    """Return strategy probability by requested move substring."""
     out = dict.fromkeys(moves, 0.0)
     for desc, p in info["strategy"]:
         for m in moves:
@@ -232,6 +234,7 @@ def _joint_mass(info, slot_a, prefixes_a, slot_b, prefixes_b):
 
 
 def build_tracker(p1_sets, p2_sets, hp, fainted, cfg, weather=""):
+    """Return a ``LogParser`` seeded to the authored public scenario state."""
     t = LogParser("scenario", 0, "", cfg.format_id)
     t.sides = {"p1": Side(p1_sets), "p2": Side(p2_sets)}
     t.weather = weather
@@ -275,6 +278,7 @@ def print_damage_matrix(searcher, p1_sets, p2_sets):
 
 
 def run_scenarios(searcher, cfg):
+    """Run authored gates and return the integer failure count."""
     failures, ran = [], 0
     for scn in SCENARIOS:
         print(f"\n--- {scn['name']} ---\n{scn['doc']}")
@@ -316,6 +320,7 @@ def run_scenarios(searcher, cfg):
 # ---------------------------------------------------------------------------
 
 def mine(cfg, max_out=50):
+    """Write up to ``max_out`` held-out endgame candidates to JSON."""
     from data import iter_battles
     out = []
     for fn in cfg.dataset_files:
@@ -364,6 +369,7 @@ def _infer_brought(mons):
 
 
 def replay(searcher, cfg, i):
+    """Reconstruct candidate ``i`` and print one chooser decision."""
     e = json.loads((cfg.artifacts_dir / "endgames.json").read_text())[i]
     t = LogParser(e["tag"], 0, "", cfg.format_id)
     t.sides = {"p1": Side(e["teams"]["p1"]), "p2": Side(e["teams"]["p2"])}
@@ -387,6 +393,7 @@ def replay(searcher, cfg, i):
 
 
 def main():
+    """Load optional checkpoint and dispatch scenarios/mine/replay CLI modes."""
     from search.debug import maybe_cprofile
     cfg = replace(CFG, n_determinizations=1)   # sets are known here
     if "--mine" in sys.argv:
@@ -405,7 +412,8 @@ def main():
         print(f"priors/values from {ckpt}")
     else:
         print("no checkpoint: uniform priors, solve-to-terminal only")
-    searcher = Searcher(model, tok, cfg, debug="--debug" in sys.argv)
+    searcher = DeterminizedDUCTChooser(
+        model, tok, cfg, debug="--debug" in sys.argv)
     cprof = sys.argv[sys.argv.index("--cprofile") + 1] \
         if "--cprofile" in sys.argv else None
     with maybe_cprofile(cprof):

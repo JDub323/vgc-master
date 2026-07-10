@@ -2,7 +2,7 @@
 
 Fixed layout (one position always means the same thing, so learned positional
 embeddings carry the structure; encode() asserts the layout every call).
-Layout 2 (current, 561 tokens):
+Layouts 2-3 (561 tokens; layout 3 is current):
 
   [0]        CLS
   [1..4]     turn bucket, weather, terrain, trick room flag
@@ -14,11 +14,11 @@ Layout 2 (current, 561 tokens):
   [123..230] opp 6 mons x 18: same shape, revealed info only (the protect
              counter is public: everyone sees Protect succeed)
   [231..272] opp 6 mons x 7 belief tokens: modal item, P(that item) bucket,
-             speed-range low, speed-range high, bulk, modal spread archetype,
-             P(that archetype). Item- and archetype-general on purpose: a
-             choice scarf shows up as the modal item AND as a stretched
-             speed-range high end; a spread shows up as an archetype, never
-             as exact numbers.
+             speed-range low, speed-range high, bulk, inferred latent, and
+             P(that latent). Layout 3 uses modal nature (the objective spread
+             prior fixes concrete SP and inference discriminates nature);
+             layout 2 used the modal hand-built spread archetype. Exact SP
+             values are never exposed as tokens.
   [273..560] damage matrix: my mon i x move j x opp mon k -> (min, max) roll
              bucket pair. Two bounds fully describe the roll distribution:
              Showdown damage is a uniform pick from 16 evenly spaced
@@ -31,9 +31,9 @@ Layout 2 (current, 561 tokens):
   counter triples per consecutive use; Wide/Quick Guard never fail from it
   but DO increment it).
 
-Layout 1 (537 tokens, archived pre-phase-3 models) is the same without the
-protect and archetype tokens; vocab.json records which layout it was built
-with, and benchmark bundles reconstruct their own layout.
+Layout 1 (537 tokens, archived pre-phase-3 models) is the same without Protect
+and the two inferred-latent belief tokens; vocab.json records the layout and
+benchmark bundles reconstruct it exactly.
 
 Designed to be swapped out wholesale: everything downstream only calls
 encode() / vocab_size() / the aux-label index helpers.
@@ -67,6 +67,8 @@ N_MONS = 6
 
 
 class PositionTokenizer:
+    """Layout-versioned encoder from CTS dictionaries to fixed token arrays."""
+
     def __init__(self, vocab: dict, lists: dict, cfg=CFG, layout=LAYOUT_VERSION):
         assert layout in (1, 2, 3), layout
         self.vocab = vocab
@@ -79,7 +81,7 @@ class PositionTokenizer:
         self._item_map = {m: i + 1 for i, m in enumerate(self.item_list)}
         self._abil_map = {m: i + 1 for i, m in enumerate(self.ability_list)}
         self.mon_block = MON_BLOCK + (1 if layout >= 2 else 0)     # + protect
-        self.belief_block = BELIEF_BLOCK + (2 if layout >= 2 else 0)  # + arch
+        self.belief_block = BELIEF_BLOCK + (2 if layout >= 2 else 0)  # + inferred latent
         self.my_base = 15
         self.opp_base = self.my_base + N_MONS * self.mon_block
         self.belief_base = self.opp_base + N_MONS * self.mon_block
@@ -106,8 +108,10 @@ class PositionTokenizer:
         toks += [f"PROB_{i}" for i in range(cfg.n_prob_buckets)]
         toks += [f"SPD_{i}" for i in range(cfg.n_speed_buckets)]
         toks += [f"BULK_{i}" for i in range(cfg.n_bulk_buckets)]
-        toks += [f"PROT_{i}" for i in range(3)]        # layout 2: 0 / 1 / 2+
-        from beliefs import ARCHETYPES                 # layout 2: spread belief
+        # Added by layout 2. Layout 3 keeps the ids so archived/current vocabs
+        # share namespaces even though its inferred-latent token is nature.
+        toks += [f"PROT_{i}" for i in range(3)]        # 0 / 1 / 2+
+        from beliefs import ARCHETYPES
         toks += [f"ARCH_{a}" for a in ARCHETYPES]
         for ns in ("species", "move", "item", "ability", "nature"):
             toks += [f"{ns}:{n}" for n in names[ns]]
@@ -126,6 +130,7 @@ class PositionTokenizer:
         return cls(d["vocab"], d["lists"], cfg, layout=d.get("layout", 1))
 
     def vocab_size(self):
+        """Return the number of token ids in the loaded vocabulary."""
         return len(self.vocab)
 
     def decode(self, ids):
@@ -137,15 +142,19 @@ class PositionTokenizer:
 
     # -- aux-label helpers (indices into namespace lists, 0 = unknown) -------
     def move_idx(self, m):
+        """Return an auxiliary move label index, or ``0`` for unknown."""
         return self._move_map.get(m, 0)
 
     def item_idx(self, it):
+        """Return an auxiliary item label index, or ``0`` for unknown."""
         return self._item_map.get(it, 0)
 
     def ability_idx(self, ab):
+        """Return an auxiliary ability label index, or ``0`` for unknown."""
         return self._abil_map.get(ab, 0)
 
     def opp_species_positions(self):
+        """Return six opponent-species token positions for auxiliary heads."""
         return [self.opp_base + k * self.mon_block + 1 for k in range(N_MONS)]
 
     # -- encoding -------------------------------------------------------------
@@ -191,6 +200,7 @@ class PositionTokenizer:
         return f"DMG_B{min(self.cfg.n_dmg_buckets - 1, int(v * self.cfg.n_dmg_buckets))}"
 
     def encode(self, state, belief_summary, dmg) -> np.ndarray:
+        """Return a layout-exact NumPy ``uint16[n_tokens]`` position vector."""
         cfg = self.cfg
         out = ["CLS",
                f"TURN_{sum(state['turn'] > e for e in TURN_EDGES)}",
