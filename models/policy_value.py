@@ -24,28 +24,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from actions import N_JOINT_ACTIONS, N_SLOT_ACTIONS, static_joint_mask
-from config import CFG
+from config import CFG, config_from_snapshot, config_snapshot
+
+
+MODEL_CFG_FIELDS = ("d_model", "n_layers", "n_heads", "d_ff", "dropout")
 
 
 class PolicyValueNet(nn.Module):
     def __init__(self, vocab_size, n_tokens, opp_positions,
-                 n_moves, n_items, n_abilities, cfg=CFG, policy_head="slot"):
+                 n_moves, n_items, n_abilities, cfg=CFG, policy_head="slot",
+                 model_cfg=None):
         super().__init__()
         # "slot" default keeps **hp construction of old checkpoints working;
         # new models are built with policy_head="joint" explicitly.
         assert policy_head in ("slot", "joint"), policy_head
+        model_cfg = model_cfg or {k: getattr(cfg, k) for k in MODEL_CFG_FIELDS}
+        self.cfg_snapshot = config_snapshot(cfg)
+        self.cfg_snapshot.update({k: model_cfg[k] for k in MODEL_CFG_FIELDS})
         self.hp = {"vocab_size": vocab_size, "n_tokens": n_tokens,
                    "opp_positions": list(opp_positions), "n_moves": n_moves,
                    "n_items": n_items, "n_abilities": n_abilities,
-                   "policy_head": policy_head}
+                   "policy_head": policy_head,
+                   "model_cfg": dict(model_cfg)}
         self.policy_head = policy_head
-        d = cfg.d_model
+        d = int(model_cfg["d_model"])
         self.emb = nn.Embedding(vocab_size, d)
         self.pos = nn.Parameter(torch.zeros(1, n_tokens, d))
         layer = nn.TransformerEncoderLayer(
-            d, cfg.n_heads, cfg.d_ff, cfg.dropout,
+            d, int(model_cfg["n_heads"]), int(model_cfg["d_ff"]),
+            float(model_cfg["dropout"]),
             activation="gelu", batch_first=True, norm_first=True)
-        self.encoder = nn.TransformerEncoder(layer, cfg.n_layers)
+        self.encoder = nn.TransformerEncoder(layer, int(model_cfg["n_layers"]))
         self.norm = nn.LayerNorm(d)
         if policy_head == "joint":
             self.joint_head = nn.Linear(d, N_JOINT_ACTIONS)
@@ -104,12 +113,16 @@ class PolicyValueNet(nn.Module):
                  "moves": torch.sigmoid(moves).cpu().numpy()})
 
     def save(self, path):
-        torch.save({"hp": self.hp, "state": clean_state_dict(self)}, path)
+        torch.save({"hp": self.hp, "state": clean_state_dict(self),
+                    "cfg": self.cfg_snapshot}, path)
 
     @classmethod
     def load(cls, path, cfg=CFG, device="cpu"):
         ck = torch.load(path, map_location=device, weights_only=False)
-        m = cls(**ck["hp"], cfg=cfg).to(device)
+        load_cfg = config_from_snapshot(ck.get("cfg"), base=cfg)
+        hp = dict(ck["hp"])
+        hp.setdefault("model_cfg", _model_cfg_from_checkpoint(hp, ck["state"], load_cfg))
+        m = cls(**hp, cfg=load_cfg).to(device)
         m.load_state_dict(strip_compile_prefix(ck["state"]))
         return m
 
@@ -150,3 +163,26 @@ def strip_compile_prefix(state):
     """Accept checkpoints saved from a compiled model before this fix."""
     p = "_orig_mod."
     return {k[len(p):] if k.startswith(p) else k: v for k, v in state.items()}
+
+
+def _model_cfg_from_checkpoint(hp, state, cfg):
+    """Best-effort architecture recovery for checkpoints saved before cfg.
+
+    n_heads and dropout are not encoded in old state dicts, so those remain
+    supplied by cfg unless the checkpoint stores model_cfg.
+    """
+    state = strip_compile_prefix(state)
+    d_model = state["emb.weight"].shape[1] if "emb.weight" in state else cfg.d_model
+    layer_ids = [
+        int(k.split(".")[2]) for k in state
+        if k.startswith("encoder.layers.") and k.split(".")[2].isdigit()
+    ]
+    d_ff = state["encoder.layers.0.linear1.weight"].shape[0] \
+        if "encoder.layers.0.linear1.weight" in state else cfg.d_ff
+    return {
+        "d_model": int(d_model),
+        "n_layers": max(layer_ids) + 1 if layer_ids else cfg.n_layers,
+        "n_heads": cfg.n_heads,
+        "d_ff": int(d_ff),
+        "dropout": cfg.dropout,
+    }

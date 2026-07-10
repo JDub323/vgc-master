@@ -1,19 +1,21 @@
 """Model-vs-model benchmarking with immutable archived snapshots.
 
 An *archive* is a frozen, self-contained bundle — checkpoint + vocab.json +
-config + metadata — in artifacts/benchmarks/<name>/. Bundles are never
-modified or deleted; each records the git commit and an "era" hash of the
-search/particle config, so results across logic changes are flagged instead of
-silently mixed. Archive the current run BEFORE landing changes that invalidate
-it (tokenizer layout, particle logic).
+config + metadata + behavior assets — in artifacts/benchmarks/<name>/.
+Bundles are never modified or deleted; each records the git commit, the search
+implementation id, and an "era" hash of the search/particle config, so results
+across logic changes are flagged instead of silently mixed. Archive the current
+run BEFORE landing changes that invalidate it (tokenizer layout, particle
+logic).
 
 A *series* between two contestants is every ordered pairing of the replica
 teams (10 teams -> 100 games, mirrors included): contestant A plays team i,
 B plays team j, for all (i, j). Both orders occur, so no team assignment
-favors a side; p1/p2 alternates by game parity. Both contestants run under
-the CURRENT search code and config (same sims, same beliefs) — the variable
-under test is the model, each loaded with its own head architecture and
-tokenizer layout via its bundle.
+favors a side; p1/p2 alternates by game parity. Each archived contestant loads
+its own model architecture, tokenizer layout, search/belief cfg, and archived
+usage/dex/spread assets when available. The Python Searcher implementation is
+still the current imported code unless/until legacy search modules are added;
+the search_impl id makes that boundary explicit.
 
 CLI: python benchmark.py archive <name> [--ckpt path] [--notes "..."]
      python benchmark.py rename <old> <new>
@@ -48,9 +50,10 @@ from datetime import date
 import torch
 
 import teams as teams_mod
-from config import CFG
+from config import (CFG, config_diff, config_from_snapshot, config_snapshot,
+                    load_config_snapshot)
 from env import Sidecar, SidecarBattle, pack_team, random_choice
-from models.policy_value import PolicyValueNet
+from models.policy_value import MODEL_CFG_FIELDS, PolicyValueNet
 from observe_game import Bot
 from search.mcts import Searcher
 from tokenizer import PositionTokenizer
@@ -59,8 +62,14 @@ from tokenizer import PositionTokenizer
 # hashes are apples-to-oranges and standings segregates them
 ERA_FIELDS = ("n_particles", "resample_floor", "damage_tolerance",
               "investment_slack", "belief_damage_hits_per_pair",
-              "spread_archetypes", "top_k_actions", "n_determinizations",
-              "solve_endgame_at", "c_puct", "format_id")
+              "spread_archetypes", "strict_attack_ev", "strict_speed_ev",
+              "strict_sp_step", "spreads_prior", "spreads_top_k",
+              "spreads_any_weight", "factored_fallback", "top_k_actions",
+              "n_determinizations", "solve_endgame_at", "c_puct",
+              "rollout_depth", "format_id")
+SEARCH_IMPL = "search.mcts.Searcher/current-python-v1"
+ARCHIVE_ASSETS = ("usage_stats.json", "dex.json", "spreads.json")
+SEARCHERS = {SEARCH_IMPL: Searcher}
 
 
 def era_hash(cfg=CFG):
@@ -106,20 +115,27 @@ def archive(name, ckpt=None, notes="", cfg=CFG):
     dst.mkdir(parents=True)
     shutil.copy2(src_ckpt, dst / "ckpt.pt")
     shutil.copy2(cfg.artifacts_dir / "vocab.json", dst / "vocab.json")
+    for asset in ARCHIVE_ASSETS:
+        src = cfg.artifacts_dir / asset
+        if src.exists():
+            shutil.copy2(src, dst / asset)
     hp = torch.load(dst / "ckpt.pt", map_location="cpu",
                     weights_only=False)["hp"]
-    (dst / "config.json").write_text(json.dumps(
-        {k: str(v) for k, v in dataclasses.asdict(cfg).items()}, indent=1))
+    ck = torch.load(dst / "ckpt.pt", map_location="cpu", weights_only=False)
+    snap = ck.get("cfg") or config_snapshot(cfg)
+    archive_cfg = config_from_snapshot(snap, base=cfg)
+    (dst / "config.json").write_text(json.dumps(snap, indent=1))
     (dst / "meta.json").write_text(json.dumps({
         "name": name, "created": date.today().isoformat(),
         "source_ckpt": str(src_ckpt), "git": git_commit(),
-        "era": era_hash(cfg), "notes": notes,
+        "era": era_hash(archive_cfg), "notes": notes,
+        "search_impl": SEARCH_IMPL,
         "policy_head": hp.get("policy_head", "slot"),
         "n_tokens": hp["n_tokens"],
         "layout": json.loads((dst / "vocab.json").read_text()).get("layout", 1),
     }, indent=1))
     print(f"archived '{name}': head={hp.get('policy_head', 'slot')}, "
-          f"n_tokens={hp['n_tokens']}, era={era_hash(cfg)}")
+          f"n_tokens={hp['n_tokens']}, era={era_hash(archive_cfg)}")
 
 
 def rename(old, new, cfg=CFG):
@@ -167,23 +183,96 @@ def list_bundles(cfg=CFG):
 # ---------------------------------------------------------------------------
 
 class Contestant:
-    """A frozen (model, tokenizer) pair. Search config is NOT frozen — both
-    sides of a series play under the current one."""
+    """A frozen model/tokenizer pair plus its archived behavior config.
+
+    The Python Searcher implementation is still the current imported module.
+    The cfg knobs and archived behavior assets are per-contestant when present.
+    """
 
     def __init__(self, name, cfg=CFG, device="cpu"):
         self.name = name
         if name == "current":
             ckpt, vocab = cfg.checkpoint_dir / "ckpt_best.pt", None
             self.meta = {"era": era_hash(cfg), "git": git_commit()}
+            self.bundle_dir = None
+            self.archive_cfg = cfg
         else:
             d = bench_dir(cfg) / name
             assert d.exists(), f"no bundle '{name}' (see benchmark.py list)"
             ckpt, vocab = d / "ckpt.pt", d / "vocab.json"
             self.meta = json.loads((d / "meta.json").read_text())
-        self.model = PolicyValueNet.load(ckpt, cfg, device)
-        self.tok = PositionTokenizer.load(cfg, path=vocab)
+            self.bundle_dir = d
+            self.archive_cfg = load_config_snapshot(d / "config.json", base=cfg)
+        self.model_cfg = _runtime_cfg(self.archive_cfg, cfg, self.bundle_dir)
+        self.model = PolicyValueNet.load(ckpt, self.model_cfg, device)
+        self.tok = PositionTokenizer.load(self.model_cfg, path=vocab)
+        self.search_cfg = self.model_cfg
+        self.usage = _load_usage(self.search_cfg, cfg)
         assert self.model.hp["n_tokens"] == self.tok.n_tokens, \
             f"{name}: checkpoint/vocab layout mismatch"
+
+
+def _runtime_cfg(saved_cfg, current_cfg, bundle_dir=None):
+    """Use saved behavior knobs with current machine paths where needed."""
+    frozen_assets = bundle_dir and (bundle_dir / "usage_stats.json").exists() \
+        and (bundle_dir / "dex.json").exists() \
+        and (not getattr(saved_cfg, "spreads_prior", True)
+             or (bundle_dir / "spreads.json").exists())
+    artifacts_dir = bundle_dir if frozen_assets else current_cfg.artifacts_dir
+    return dataclasses.replace(
+        saved_cfg,
+        artifacts_dir=artifacts_dir,
+        node_dir=current_cfg.node_dir,
+        node_bin=current_cfg.node_bin,
+        checkpoint_dir=current_cfg.checkpoint_dir,
+        data_dir=current_cfg.data_dir,
+        parsed_dir=current_cfg.parsed_dir,
+        prepped_dir=current_cfg.prepped_dir,
+    )
+
+
+def _load_usage(search_cfg, current_cfg):
+    p = search_cfg.artifacts_dir / "usage_stats.json"
+    if not p.exists():
+        p = current_cfg.artifacts_dir / "usage_stats.json"
+    return json.loads(p.read_text())
+
+
+def _with_runtime_overrides(saved_cfg, current_cfg, sims=None, depth=None):
+    return dataclasses.replace(
+        saved_cfg,
+        sims_per_move=sims or saved_cfg.sims_per_move,
+        rollout_depth=depth or saved_cfg.rollout_depth,
+        node_dir=current_cfg.node_dir,
+        node_bin=current_cfg.node_bin,
+    )
+
+
+def _print_cfg_diffs(a, b, current_cfg):
+    fields = ERA_FIELDS + MODEL_CFG_FIELDS
+    diffs = config_diff(a.search_cfg, b.search_cfg, fields=fields)
+    cur_a = config_diff(current_cfg, a.search_cfg, fields=fields)
+    cur_b = config_diff(current_cfg, b.search_cfg, fields=fields)
+    print(f"  search impl: {a.meta.get('search_impl', 'unknown')} vs "
+          f"{b.meta.get('search_impl', 'unknown')} (running {SEARCH_IMPL})")
+    if diffs:
+        print("  archived cfg differences:")
+        for name, va, vb in diffs:
+            print(f"    {name}: {a.name}={va!r}  {b.name}={vb!r}")
+    if cur_a or cur_b:
+        print("  current-vs-archive cfg differences:")
+        for label, rows in ((a.name, cur_a), (b.name, cur_b)):
+            if rows:
+                msg = ", ".join(f"{n}: current={va!r}, {label}={vb!r}"
+                                for n, va, vb in rows[:8])
+                extra = "" if len(rows) <= 8 else f" (+{len(rows) - 8} more)"
+                print(f"    {label}: {msg}{extra}")
+
+
+def _make_searcher(contestant, run_cfg):
+    impl = contestant.meta.get("search_impl") or SEARCH_IMPL
+    cls = SEARCHERS.get(impl, Searcher)
+    return cls(contestant.model, contestant.tok, run_cfg)
 
 
 def run_game(sc, bots, sets_by_side, cfg, temperature, rng, max_turns=300,
@@ -254,12 +343,19 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
     nondeterminism in search).
     spectate: serve a live dashboard; save_replays: write .log/.html per game."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    A = Contestant(name_a, cfg, device)
+    B = Contestant(name_b, cfg, device)
     run_cfg = dataclasses.replace(
         cfg, sims_per_move=sims or cfg.sims_per_move,
         rollout_depth=depth or cfg.rollout_depth)
-    A = Contestant(name_a, cfg, device)
-    B = Contestant(name_b, cfg, device)
-    usage = json.loads((cfg.artifacts_dir / "usage_stats.json").read_text())
+    cfg_a = _with_runtime_overrides(A.search_cfg, cfg, sims=sims, depth=depth)
+    cfg_b = _with_runtime_overrides(B.search_cfg, cfg, sims=sims, depth=depth)
+    if cfg_a.format_id != cfg_b.format_id:
+        print(f"  WARNING: contestants use different formats: "
+              f"{A.name}={cfg_a.format_id}, {B.name}={cfg_b.format_id}; "
+              f"the game engine will use current={run_cfg.format_id}")
+    if verbose:
+        _print_cfg_diffs(A, B, run_cfg)
     team_names = list(teams_mod.TEAMS)
     team_sets = {t: teams_mod.get(t) for t in team_names}
     jobs = [(g, ta, tb) for g, (ta, tb) in
@@ -280,8 +376,8 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
     def worker():
         # per-thread searchers: each owns a sidecar + damage bridge; the
         # models/tokenizers are shared (inference only)
-        sa = Searcher(A.model, A.tok, run_cfg)
-        sb = Searcher(B.model, B.tok, run_cfg)
+        sa = _make_searcher(A, cfg_a)
+        sb = _make_searcher(B, cfg_b)
         sc = Sidecar(run_cfg)
         try:                      # noqa: the finally closes all node procs
             while True:
@@ -296,9 +392,9 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                 rng = random.Random((g << 8) + 1)
                 bots = {
                     side_of["a"]: Bot(side_of["a"], sets[side_of["a"]],
-                                      sets[side_of["b"]], sa, usage, run_cfg),
+                                      sets[side_of["b"]], sa, A.usage, cfg_a),
                     side_of["b"]: Bot(side_of["b"], sets[side_of["b"]],
-                                      sets[side_of["a"]], sb, usage, run_cfg)}
+                                      sets[side_of["a"]], sb, B.usage, cfg_b)}
                 feed = spectator.new_game(name_a, name_b, ta, tb, side_of,
                                           run_cfg.format_id) \
                     if spectator else None
@@ -308,11 +404,19 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                        "winner": {side_of["a"]: "a", side_of["b"]: "b"}.get(
                            winner, "tie"),
                        "turns": turns, "sims": run_cfg.sims_per_move,
+                       "sims_a": cfg_a.sims_per_move,
+                       "sims_b": cfg_b.sims_per_move,
                        "rollout_depth": run_cfg.rollout_depth,
+                       "rollout_depth_a": cfg_a.rollout_depth,
+                       "rollout_depth_b": cfg_b.rollout_depth,
                        "temp": temperature, "date": date.today().isoformat(),
                        "era_a": A.meta.get("era", ""),
                        "era_b": B.meta.get("era", ""),
-                       "era_run": era_hash(run_cfg), "git": git_commit()}
+                       "era_run": era_hash(run_cfg),
+                       "era_run_a": era_hash(cfg_a),
+                       "era_run_b": era_hash(cfg_b),
+                       "git": git_commit(),
+                       "search_impl": SEARCH_IMPL}
                 with jobs_lock:
                     results.append(res)
                     if verbose:

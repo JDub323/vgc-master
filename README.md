@@ -173,12 +173,30 @@ joint head that reproduces the factorized distribution *bit-for-bit*, so
 archived phase-1 bundles remain valid opponents.
 
 **Benchmarker** ([benchmark.py](benchmark.py)) freezes checkpoints into immutable bundles
-(ckpt + vocab + config + git hash + an "era" hash of the search/particle
-config) under `artifacts/benchmarks/`, never deleted. A series is every ordered
-pairing of the replica teams; results are stored and rated, and games from
-different eras are kept apart so a logic change never silently pollutes the
-Elo. This is the "test my new idea against the first baseline" workflow —
-archive `v1-bc` once, compare forever.
+(ckpt + vocab + typed config + usage/dex/spread assets + git hash + an "era"
+hash of the search/particle config) under `artifacts/benchmarks/`, never
+deleted. A series is every ordered pairing of the replica teams; results are
+stored and rated, and games from different eras are kept apart so a logic
+change never silently pollutes the Elo. This is the "test my new idea against
+the first baseline" workflow — archive `v1-bc` once, compare forever.
+
+Compatibility contract:
+
+- Frozen with a saved checkpoint/archive: model weights, token layout/vocab,
+  model architecture knobs (`d_model`, layers, heads, FF size, dropout), and
+  search/belief config knobs. New archives also carry `usage_stats.json`,
+  `dex.json`, and `spreads.json` when present, so belief priors are not
+  accidentally replaced by later artifacts.
+- Still current-code behavior: the Python implementation of `search.mcts`,
+  battle reconstruction, action enumeration, tracker parsing, and the installed
+  Showdown/calc engine. Archives record a `search_impl` id and the git commit,
+  but they do not bundle old Python modules. To make a full historical bot
+  byte-for-byte static, add a versioned legacy search module and dispatch to it
+  from the archived `search_impl` through `benchmark.SEARCHERS`.
+- During benchmark play, each archived model uses its own saved cfg/assets for
+  its Searcher and belief filter. The runner prints cfg differences between the
+  two contestants and between each archive and the current cfg, so a model gap
+  that includes behavior changes is visible.
 
 **EV-spread archetypes** ([beliefs.py](beliefs.py)) widen the particle prior: each
 redacted-spread set expands into low-dimensional archetypes (fast /

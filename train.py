@@ -25,7 +25,7 @@ from torch.utils.data import (BatchSampler, DataLoader, Dataset,
                               RandomSampler, SequentialSampler)
 
 from actions import N_SLOT_ACTIONS
-from config import CFG
+from config import CFG, config_snapshot
 from models.policy_value import PolicyValueNet, clean_state_dict
 from tokenizer import PositionTokenizer
 
@@ -188,7 +188,8 @@ def main(cfg=CFG):
               f"aux {tr['aux']:.4f} top1 {tr['top1_joint']:.3f} | "
               f"val loss {va['loss']:.4f} top1 {va['top1_joint']:.3f} | "
               f"{time.time() - t0:.0f}s")
-        ck = {"hp": model.hp, "state": clean_state_dict(model), "epoch": epoch}
+        ck = {"hp": model.hp, "state": clean_state_dict(model), "epoch": epoch,
+              "cfg": config_snapshot(cfg)}
         torch.save(ck, last)
         if va["loss"] < best_val:
             best_val = va["loss"]

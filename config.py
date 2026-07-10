@@ -1,5 +1,8 @@
 """The one place every knob lives. Change model size or format here, nowhere else."""
 
+import ast
+import dataclasses
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -174,3 +177,97 @@ class Config:
 
 
 CFG = Config()
+
+
+# If an archived config predates a behavior-changing field, missing means the
+# code that created the archive did not have that feature. Prefer legacy-off
+# over silently enabling today's behavior for old bundles.
+LEGACY_MISSING_DEFAULTS = {
+    "strict_attack_ev": False,
+    "strict_speed_ev": False,
+    "spreads_prior": False,
+    "factored_fallback": False,
+}
+
+
+def _jsonable(v):
+    if isinstance(v, Path):
+        return str(v)
+    if isinstance(v, tuple):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, list):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _jsonable(val) for k, val in v.items()}
+    return v
+
+
+def config_snapshot(cfg=CFG):
+    """Typed JSON snapshot of a Config.
+
+    Old benchmark archives wrote every value through str(); loaders below still
+    accept those files, but new checkpoints/archives keep booleans, numbers,
+    lists and dicts typed so model/search behavior can be reconstructed later.
+    """
+    return {k: _jsonable(v) for k, v in dataclasses.asdict(cfg).items()}
+
+
+def _parse_legacy_string(s):
+    if s in ("True", "False"):
+        return s == "True"
+    if s == "None":
+        return None
+    try:
+        return ast.literal_eval(s)
+    except (SyntaxError, ValueError):
+        return s
+
+
+def _coerce_like(default, value):
+    if isinstance(value, str):
+        value = _parse_legacy_string(value)
+    if isinstance(default, Path):
+        return Path(value)
+    if isinstance(default, bool):
+        return bool(value)
+    if isinstance(default, int) and not isinstance(default, bool):
+        return int(value)
+    if isinstance(default, float):
+        return float(value)
+    if isinstance(default, tuple):
+        return tuple(value)
+    if isinstance(default, dict):
+        return dict(value)
+    return value
+
+
+def config_from_snapshot(snapshot, base=None):
+    """Build a Config from a saved snapshot, tolerating missing/old fields."""
+    if snapshot is None:
+        return base or Config()
+    if "config" in snapshot and isinstance(snapshot["config"], dict):
+        snapshot = snapshot["config"]
+    base = base or Config()
+    vals = dataclasses.asdict(base)
+    for f in dataclasses.fields(Config):
+        if f.name in snapshot:
+            vals[f.name] = _coerce_like(vals[f.name], snapshot[f.name])
+        elif f.name in LEGACY_MISSING_DEFAULTS:
+            vals[f.name] = LEGACY_MISSING_DEFAULTS[f.name]
+    return Config(**vals)
+
+
+def load_config_snapshot(path, base=None):
+    return config_from_snapshot(json.loads(Path(path).read_text()), base=base)
+
+
+def config_diff(a, b, fields=None):
+    """Return [(field, a_value, b_value), ...] for meaningful config diffs."""
+    da, db = config_snapshot(a), config_snapshot(b)
+    names = fields or sorted(set(da) | set(db))
+    out = []
+    for name in names:
+        va, vb = da.get(name), db.get(name)
+        if va != vb:
+            out.append((name, va, vb))
+    return out
