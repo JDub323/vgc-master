@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@smogon/calc": "^0.11.0",
+    "pokemon-showdown": "github:smogon/pokemon-showdown#e440c4a18385274f10c405d0b158b6a962ce6d94"
+  }
+}
