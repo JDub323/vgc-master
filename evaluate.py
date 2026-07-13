@@ -26,12 +26,12 @@ CLI: python evaluate.py [checkpoint]
 import sys
 
 import numpy as np
-import torch
 
 from actions import N_SLOT_ACTIONS, from_index, static_joint_mask
 from config import CFG
-from models.baselines import MaxDamagePolicy, RandomPolicy
-from models.policy_value import PolicyValueNet
+from evaluation_common import load_test_predictions
+from models.baselines import (DamageStatusSwitchCandidates, MaxDamagePolicy,
+                              RandomPolicy)
 from tokenizer import N_MONS, PositionTokenizer
 from train import Shards
 
@@ -200,19 +200,10 @@ def aux_report(model, ds, cfg):
 def main(cfg=CFG):
     ckpt = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") \
         else cfg.checkpoint_dir / "ckpt_best.pt"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    ds = Shards("test", cfg)
-    files = sorted((cfg.prepped_dir).glob("test_*.npz"))
-    dmg_active = np.concatenate([np.load(f)["dmg_active"] for f in files])
+    ds, dmg_active, model, net = load_test_predictions(ckpt, cfg)
     acts = ds.acts.astype(np.int64)
     print(f"test transitions: {len(ds)}")
 
-    model = PolicyValueNet.load(ckpt, cfg, device)
-    dists = []
-    for i in range(0, len(ds), cfg.batch_size):
-        d, _, _ = model.predict_batch(ds.tokens[i:i + cfg.batch_size])
-        dists.append(d)
-    net = np.concatenate(dists).astype(np.float64)
     rows = {"policy net": score(net, acts),
             "max damage": score(factorized_to_joint(
                 MaxDamagePolicy().predict_batch(dmg_active)), acts),
@@ -226,10 +217,19 @@ def main(cfg=CFG):
     print("\n(recall@k = pruned-set recall: human joint action inside model top-k; "
           "baseline perplexities use eps-smoothed one-hot/uniform dists)")
 
+    tok = PositionTokenizer.load(cfg)
+    sanity = DamageStatusSwitchCandidates(tok, cfg.artifacts_dir / "dex.json")
+    ranked = sanity.ranked(ds.tokens, dmg_active, 16)
+    labels = acts[:, 0] * N_SLOT_ACTIONS + acts[:, 1]
+    print("\nsanity candidate-set recall (4 max-damage target combos first; "
+          "then seeded-random status/damage/switch combos):")
+    for k in (cfg.top_k_actions, 16):
+        hit = np.mean([int(label in row[:k]) for label, row in zip(labels, ranked)])
+        print(f"  recall@{k}: {hit:.3f}")
+
     if "--switches" in sys.argv:
         switch_report(net, acts)
     if "--worst" in sys.argv or "--aux" in sys.argv:
-        tok = PositionTokenizer.load(cfg)
         if "--aux" in sys.argv:
             aux_report(model, ds, cfg)
         if "--worst" in sys.argv:
