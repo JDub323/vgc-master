@@ -1,9 +1,14 @@
 # Standing brief for experiment agents
 
 You are running **one** experiment on the vgc-bot codebase, on your own branch,
-in your own worktree, in parallel with other agents doing the same thing on
-other experiments. You will never see their work. Everything below exists so
-that your result and theirs can be **played against each other** at the end.
+in your own worktree, in parallel with other agents running *different*
+experiments on theirs. You will never see their work; do not try to coordinate
+with them or guess what they are doing.
+
+The blades converge at the end in a **round robin**: every experiment exports a
+self-contained agent bundle into a shared pile, and a coordinator plays them
+against each other for Elo. An experiment that produces a brilliant result but
+cannot be exported and played is worth nothing to this process.
 
 Read `README.md` for what the bot is, and the codebase primer for how the
 algorithms work. This document is only about *how to land an experiment so it
@@ -11,228 +16,262 @@ composes with everyone else's*.
 
 ---
 
-## 1. The one rule: be additive
+## 0. The frame: the interface is the game protocol, not any class
 
-**Add a new agent. Do not modify the existing one.**
+**The tournament never imports your code.**
 
-The trunk carries a frozen contestant named `baseline` (the 1x joint-policy /
-layout-3 model). It is the anchor of the whole rating system. Every experiment
-is measured against it. If you change how `baseline` behaves, you have
-destroyed the measuring stick, and every previously recorded result becomes
-uninterpretable.
+`round_robin.py` owns the one battle engine both sides play on. It runs each
+contestant as a **black-box subprocess** and speaks a small JSON-lines protocol
+to it: here are protocol lines, here is a sim request, give me a Showdown
+choice string. What is inside — transformer, hand-coded search, seq2seq, a
+Magic 8-Ball — is invisible to it and irrelevant.
 
-Concretely, these ten files are **shared behavior** and are hashed into every
-archive ever made (`agents/registry.py BEHAVIOR_SOURCE_FILES`):
+That is the whole design, and it has one enormous consequence:
+
+> **Nothing has to merge.** Two blades with incompatible tokenizers, different
+> action spaces, or no neural network at all play each other on day one. No
+> git discipline can reconcile "two definitions of what a position is" — so we
+> don't try. The bundle snapshots your source; the protocol is the only thing
+> both sides agree on.
+
+This is the chess-engine (UCI) model. It is why you should feel free to make
+deep, incompatible changes if your experiment calls for them — and why the
+rules that *do* still bind you are narrower than they look.
+
+## 1. Declare your lane, in your first report
+
+Two lanes. Pick one deliberately; say which.
+
+**Pile-only** — you are exploring something that cannot merge (new tokenizer
+layout, new action space, no transformer, seq2seq). **Change anything you
+want.** Your bundle carries its own source, so trunk compatibility is not your
+problem. §3 does not apply to you.
+
+**Mergeable** — you are improving the current DUCT system and want the change
+to land on trunk and be comparable through `benchmark.py`'s in-repo ladder
+(checkpoint swaps, brick swaps, knob changes). Then §3 binds.
+
+Most structural rewrites are pile-only. Most tuning is mergeable. **When in
+doubt, pick pile-only**: it costs nothing, and a pile-only experiment that
+turns out to be worth keeping can be re-landed additively later, whereas a
+blade that over-constrains itself protecting an archive path it never uses has
+simply wasted effort.
+
+## 2. Speak the protocol
+
+Your experiment is done when it is a **bundle the coordinator can run**. There
+are two paths to that, and you should decide which one you are on early.
+
+### Path A — your agent fits the `MoveChooser` shape (most experiments)
+
+If your idea can be expressed as "given the tracker, belief, and request,
+return a joint action," implement `MoveChooser` from `agents/interfaces.py`:
+
+```python
+def choose(self, tracker, belief, my_id, request, brought,
+           opp_brought=None, temperature=None, root_noise=None
+           ) -> tuple[JointAction, ChoiceInfo]:
+```
+
+Then register a kind in `agent_server.build_chooser` (one `if` branch on your
+branch) and export with `--agent <kind>`. `agent_server.py` handles the
+protocol for you.
+
+If you are only swapping *part* of the search (a different leaf evaluator,
+prior, or tree policy), you want a **brick**, not a whole chooser: implement
+the relevant protocol in `agents/interfaces.py` (`PositionEncoder`,
+`PolicyPrior`, `LeafEvaluator`, `Searcher`, `BeliefModel`) and inject it.
+Bricks compose; whole choosers don't.
+
+### Path B — it doesn't fit
+
+Then **do not contort it to fit.** `agent_server.py` is a *convenience
+implementation* of the protocol for `MoveChooser`-shaped agents — it is not the
+contract. The contract is the protocol itself.
+
+Write your own server that speaks it and point the bundle at it:
+
+```bash
+python export_agent.py exp-my-thing --entrypoint "python my_server.py --flag" \
+    --ckpt artifacts/checkpoints/my_weights.pt --architecture "MyThing"
+```
+
+The manifest records that command; the coordinator runs it from the bundle's
+`src/` with `$VGC_NODE_DIR` set. Nothing else about your agent is inspected.
+
+### The protocol (v1)
+
+One JSON object per line. `agent_server.py`'s module docstring is the full
+spec; the shape is:
+
+```
+-> {"type":"hello","protocol":1}                    <- {"type":"ready", ...}
+-> {"type":"game_start","side":"p1","team":[...],
+    "opp_preview":[...],"seed":N,"temperature":T}   <- {"type":"game_ready"}
+-> {"type":"lines","lines":["|move|...", ...]}         (no reply)
+-> {"type":"request","rqid":N,"request":{...},
+    "deadline_s":null}                              <- {"type":"choice","rqid":N,
+                                                        "choice":"move 1 2, move 3"}
+-> {"type":"game_end","winner":"p1"}                   (no reply)
+-> {"type":"quit"}
+```
+
+Four rules that will otherwise cost you a day:
+
+- **stdout is the protocol channel.** A stray `print` corrupts the stream.
+  `agent_server.py` redirects `sys.stdout` to stderr and keeps a private handle
+  for protocol writes; do the same.
+- **You answer every request kind**, including team preview and forced
+  switches. The default adapter reproduces the standard behavior (`team 1234`,
+  random legal switch) so `baseline` is unchanged — but improving on either is
+  a legitimate experiment, and this is the only harness where you *can*.
+- **`deadline_s` is advisory.** The coordinator enforces budgets; you cannot
+  preempt your own search. Answer as fast as you can and let it judge.
+- **Crashing or hanging forfeits the game.** Stderr is kept under
+  `<pile>/logs/`.
+
+## 3. Mergeable lane only: be additive
+
+Skip this section if you declared pile-only.
+
+**Add a new agent. Do not modify the existing one.** The trunk carries a frozen
+contestant named `baseline` (the 1× joint-policy / layout-3 model). It is the
+anchor of the rating system. If you change how it behaves, every previously
+recorded result becomes uninterpretable.
+
+These ten files are **shared behavior**, hashed into every archive ever made
+(`agents/registry.py BEHAVIOR_SOURCE_FILES`):
 
 ```
 actions.py  beliefs.py  config.py  damage.py  data.py
 env.py  models/policy_value.py  search/mcts.py  search/node.py  tokenizer.py
 ```
 
-Any **logic** edit to one of these invalidates the source hash of *every*
-existing archive, including `baseline`, and they will refuse to load
-(fail-closed). Comments and docstrings are safe — hashing is ast-v1, i.e. the
-docstring-stripped AST — but a new `if` branch is not.
+Any **logic** edit to one invalidates the source hash of every existing
+archive, including `baseline`, and they fail closed. Comments and docstrings
+are safe (hashing is ast-v1 — the docstring-stripped AST); a new `if` branch is
+not.
 
-- **If you do not need to touch them: don't.** Put everything under
-  `agents/<your-name>/v1.py`.
-- **If you genuinely must** (e.g. your experiment is a new tokenizer layout),
-  that is allowed, but you must say so loudly in your final report, because it
-  forces every contestant to be re-archived at integration time. Make the edit
-  **purely additive** (a new layout branch, a new optional flag defaulting to
-  today's behavior) so existing agents are bit-identical in behavior.
-- **Never** change the default value of an existing `config.py` field. Add a
-  new field, defaulted to today's behavior.
+- Put everything under `agents/<your-name>/v1.py` if you can.
+- Take a stable ID in `agents/ids.py` (`MY_THING_V1 = "agents.my_thing.v1.MyThingChooser"`)
+  and register it in `agents/registry.py` (`REGISTRY.register_agent(...)`). The
+  registry is a fail-closed allow-list — no `importlib` fallback, so an
+  unregistered ID raises rather than silently running today's code.
+- `v1` means "this exact behavior, forever." Changing behavior means `v2`; you
+  do not edit `v1`.
+- **Never** change the default of an existing `config.py` field. Add a new one,
+  defaulted to today's behavior.
 
-## 2. The contract
+Note `benchmark.py archive` hardcodes the five-brick DUCT manifest, so it can
+only freeze DUCT-family agents. Anything else goes to the pile — which is
+everything, so this is a fallback ladder, not a restriction.
 
-Your experiment is done when it is a **registered, archivable `MoveChooser`**.
-
-1. **Implement the protocol.** `agents/interfaces.py` defines it. One method:
-
-   ```python
-   def choose(self, tracker, belief, my_id, request, brought,
-              opp_brought=None, temperature=None, root_noise=None
-              ) -> tuple[JointAction, ChoiceInfo]:
-   ```
-
-   That is the *entire* interface for playing games and earning Elo. Return a
-   legal joint action and the diagnostics dict. If you cannot express your idea
-   behind this signature, stop and report why — that is itself a finding.
-
-2. **Take a stable ID.** Add a constant to `agents/ids.py`:
-
-   ```python
-   MY_THING_V1 = "agents.my_thing.v1.MyThingChooser"
-   ```
-
-   The ID is permanent and versioned. `v1` means "this exact behavior, forever."
-   If you later change the behavior, that is `v2` — you do not edit `v1`.
-
-3. **Register it.** One line in `agents/registry.py`:
-
-   ```python
-   REGISTRY.register_agent(MY_THING_V1, MyThingChooser)
-   ```
-
-   The registry is a fail-closed allow-list. There is deliberately no
-   `importlib` fallback: an unregistered ID raises rather than silently running
-   today's code.
-
-4. **Make it playable over the game protocol.** Register your kind in
-   `agent_server.build_chooser` on your branch (one `if` branch). If your
-   agent cannot be driven by `agent_server.py`'s request/choice loop, stop
-   and report why — that too is a finding.
-
-5. **Freeze it into the pile.** `python export_agent.py <name> --agent
-   <kind> --notes "..."` writes a self-contained bundle (source snapshot +
-   assets + manifest). See §7.
-
-If you are only swapping *part* of the search (a different leaf evaluator, a
-different prior, a different tree policy), you probably want a **brick**, not a
-whole chooser: implement the relevant protocol in `agents/interfaces.py`
-(`PositionEncoder`, `PolicyPrior`, `LeafEvaluator`, `Searcher`, `BeliefModel`),
-give it a `..._V2` ID, register with `register_brick`, and inject it. Bricks
-compose; whole choosers don't.
-
-## 3. Hard constraints you will otherwise discover the hard way
+## 4. Hard constraints (both lanes)
 
 - **`artifacts/` is gitignored — in its entirety.** Checkpoints, vocab, data
-  shards, and every benchmark bundle. **Your branch carries code, not your
-  agent.** If your experiment trains anything, the weights exist only on the
-  machine you trained on. Shipping the bundle is part of your job (§4), not an
-  afterthought. A bundle is a self-contained directory; `rsync`/`scp -r` moves
-  it fine.
-- **Bundles are immutable.** `archive` refuses to overwrite an existing name.
-  Pick a fresh, descriptive name. Use `benchmark.py rename` if you must.
-- **Don't retrain the baseline's data.** `data.py prep` is hours long and the
-  shards are shared. If your experiment needs a different tokenization, you are
-  producing *new* shards — say so, and do not clobber the existing ones.
-- **The test suite is a gate, not a suggestion.** Before you report done:
+  shards, benchmark bundles. **Your branch carries code, not your agent.** If
+  you train anything, the weights exist only on the machine you trained on.
+  `export_agent.py` copies them into the bundle explicitly; shipping that
+  bundle is part of your job (§5), not an afterthought.
+- **Bundles are immutable.** The exporter refuses to overwrite a name. Pick a
+  fresh, descriptive one; re-export after changes rather than editing in place.
+- **Don't clobber the shared data.** `data.py prep` is hours long and the
+  shards are shared. If your experiment needs a different tokenization you are
+  producing *new* shards — say so, and leave the existing ones alone.
+- **The gates are gates, not suggestions.** Before reporting done:
   ```
-  python -m pytest -q
   python tests/test_documentation.py
+  python tests/test_agents.py
+  python scenarios.py
   ```
-  Two documentation rules will catch you specifically:
-  - every production function needs a **docstring** (or a `DATA_CONTRACTS.md`
-    entry) — a bare helper with no docstring fails CI;
-  - every production **module** must be named in `README.md` or
-    `DATA_CONTRACTS.md` — so a new `agents/my_thing/v1.py` requires a
-    documentation line. Add it.
-- **Scenario gates must still pass**: `python scenarios.py`. If your agent
-  makes the Metagross/Kingambit mixed-strategy gate fail (both options ≥ 20%),
-  that is a real finding about your architecture — report it, don't weaken the
-  gate.
+  Two documentation rules catch experiments specifically: every production
+  function needs a **docstring** (or a `DATA_CONTRACTS.md` entry), and every
+  production **module** must be named in `README.md` or `DATA_CONTRACTS.md` —
+  so a new `agents/my_thing/v1.py` needs a documentation line. Add it.
+  If your architecture makes a gate *meaningless* (e.g. `scenarios.py`'s
+  mixed-strategy assertion against a deliberately pure-strategy agent), report
+  that as a finding — do not weaken the gate.
 
-## 4. Definition of done
+## 5. Definition of done
 
-You are not done when the code works. You are done when **all** of these are
-true:
+You are not done when the code works. You are done when all of these are true:
 
-1. Code is committed on your branch `exp/<short-name>`, and pushed.
-2. `pytest -q`, `tests/test_documentation.py`, and `scenarios.py` pass.
-3. Your agent is registered with a versioned ID and can be constructed.
-4. If it plays: an exported pile bundle exists (`export_agent.py`), **and you
-   have stated where it lives** (which machine, which pile path) so it can be
-   collected for the round robin.
-5. If it plays: you have run at least a quick series against the anchor and
-   reported the number:
+1. Code committed and pushed on `exp/<short-name>`.
+2. The gates in §4 pass, or you have explained precisely which one doesn't and
+   why that is the experiment's result rather than its failure.
+3. An exported bundle exists **and you have stated where it lives** (which
+   machine, which pile path) so it can be collected for the round robin.
+4. You have run at least a quick series against the anchor and reported it:
    ```
-   python round_robin.py play <your-name> <anchor> --quick 20
+   python round_robin.py play exp-<short-name> <anchor> --quick 20
    ```
-   (or `benchmark.py play <name> baseline --quick 20` for DUCT-family
-   agents). `--quick 20` is triage, not a verdict — a 100-game series has
-   roughly a ±10% Wilson interval, so 20 games tells you only "not obviously
+   `--quick 20` is triage, not a verdict — a full 100-game series carries a
+   roughly ±10% Wilson interval, so 20 games tells you only "not obviously
    broken."
-6. You have appended a section to `EXPERIMENTS.md` (see §6).
-7. You have explicitly listed **every shared file you touched** (§1), or stated
+5. A section appended to `EXPERIMENTS.md` (§6).
+6. Your lane (§1), and — if mergeable — **every shared file you touched**, or
    "none."
-
-## 5. Two freezing mechanisms — know which one you need
-
-- **`benchmark.py archive`** freezes *DUCT-family* agents (checkpoint swaps,
-  brick swaps) for the in-repo dev ladder. It hardcodes the five-brick DUCT
-  manifest, so a genuinely new architecture cannot be archived faithfully
-  through it — do not try.
-- **`export_agent.py` + the pile** freezes *anything*. It snapshots your
-  branch's source and assets into a self-contained bundle that runs as a
-  subprocess behind the game protocol (`agent_server.py`), so your agent
-  never needs to merge or share code to be compared. This is the tournament
-  path, and the one your experiment must end on (§7).
-
-Rule of thumb: iterating on the DUCT system → `benchmark.py play current
-baseline` while you work; anything else, or anything final → export to the
-pile.
 
 ## 6. What to write in `EXPERIMENTS.md`
 
 The code may be deleted. The conclusion must survive. `EXPERIMENTS.md` is the
-durable record — one-off training scripts and giant checkpoints deliberately
-are not maintained.
+durable record; one-off training scripts and giant checkpoints are deliberately
+not maintained.
 
-Append a section with:
-
-- **What you changed**, in one paragraph, including the shared files touched.
-- **A table of numbers against the frozen baseline's fixed splits** — the
-  existing sections use 871,433 train / 46,993 val / 46,751 test transitions.
-  Use the same ones or explain why not.
+- **What you changed**, in one paragraph.
+- **Numbers against the frozen baseline's fixed splits** — existing sections
+  use 871,433 train / 46,993 val / 46,751 test transitions. Use those or
+  explain why not.
 - **Which metric moved and which didn't.** Validation loss and top-1 are not
-  the goal; the goal is Elo. If you only have offline metrics, say so — the
-  `EXPERIMENTS.md` damage-ablation and MLP rows are explicitly flagged as
-  *never evaluated in search*, and that is the honest way to report it.
-- **The negative result if it's negative.** The 100x scaling row is in there
-  precisely because it *overfit and lost to the 1x baseline*. That is a
-  valuable, expensive fact. Do not bury yours.
+  the goal; Elo is. If you only have offline metrics, say so — the existing
+  damage-ablation and MLP rows are explicitly flagged as *never evaluated in
+  search*, and that is the honest way to report it. Note also that
+  `evaluate.py` prints policy metrics over two action sets (static mask vs
+  position-legal) which are **not comparable to each other**; say which you
+  are quoting.
+- **The negative result, if it's negative.** The 100× scaling row exists
+  precisely because it overfit and lost to the 1× baseline. That is a valuable,
+  expensive fact. Do not bury yours.
 
-## 7. Exporting to the pile (the tournament handoff)
+## 7. Exporting to the pile
 
-The *pile* is a shared directory of exported agent bundles (default
-`../vgc-pile`, next to the repo so sibling worktrees share it; override with
-`--pile` or `$VGC_PILE`). The round-robin coordinator plays bundles against
-each other as **subprocesses**, so your bundle competes even if your branch's
-code is incompatible with everyone else's.
-
-Your handoff, from your worktree:
+The *pile* is a plain shared directory of bundles — not a git thing. It
+defaults to `../vgc-pile`, a **sibling of the repo**, so every sibling worktree
+resolves to the same one with no configuration (`--pile` / `$VGC_PILE`
+override). Each bundle holds a snapshot of your source (via `git ls-files`, so
+gitignored paths are excluded), the behavior assets, any checkpoint (at
+`artifacts/checkpoints/ckpt.pt`), and a manifest recording the entrypoint, git
+provenance, and architecture label.
 
 ```bash
-# 1. register your chooser kind in agent_server.build_chooser (your branch)
-# 2. sanity-check the adapter starts:  python agent_server.py -h
 python export_agent.py exp-<short-name> --agent <kind> \
     --notes "one line: what this is and what changed"
 python round_robin.py list
 python round_robin.py play exp-<short-name> <anchor> --quick 10
 ```
 
-Facts to respect:
-
-- **Bundles are immutable and self-contained.** The exporter snapshots your
-  working tree (dirty is fine — the manifest records `dirty: true`) plus the
-  behavior assets. Re-export under a new name after changes; never edit a
-  bundle in place.
 - **The pile does not travel by git either.** If you trained on a different
-  machine than the tournament box, `rsync -a` your bundle directory into the
-  tournament machine's pile. Stating where the bundle lives is part of your
-  definition of done (§4).
-- **Timing is recorded on every result row** (seconds/move per side), and the
-  coordinator may enforce `--move-budget`. A slow agent is not disqualified —
-  but its cost is public, so don't hide search-time regressions.
-- **Crashes forfeit.** Your process dying or going silent past the hang
-  timeout loses that game and leaves a stderr log under `<pile>/logs/`. Test
-  your adapter with a `--quick` series before calling the experiment done.
-- The coordinator assigns teams (the replica set) and owns the battle engine;
-  your agent just answers requests. Team preview and forced-switch requests
-  are forwarded to you too — the default adapter reproduces the standard
-  behavior, and improving on it is a legitimate experiment.
+  machine than the tournament box, `rsync -a` your bundle into that machine's
+  pile.
+- **Dirty working trees are fine** — the manifest records `dirty: true`. The
+  snapshot is the truth, the commit is provenance.
+- **Timing is public.** Every result row records each side's seconds/move, and
+  the coordinator may enforce `--move-budget`. A slow agent is not
+  disqualified, but don't hide a search-time regression.
+- **The coordinator owns teams and the engine.** It assigns the replica teams
+  and alternates sides; you just answer requests.
 
 ## 8. Anti-goals
 
-- Do not "clean up" v1 modules, the versioning, or the registry. The freezing
-  *is* the design: it is what lets your agent and a six-month-old agent play a
-  fair game.
 - Do not tune the baseline to make your experiment look good.
 - Do not widen your scope. One experiment. If you find a second idea, write it
-  down in your report; someone else gets that branch.
+  in your report; someone else gets that blade.
+- Do not "clean up" the v1 modules, the versioning, or the registry. The
+  freezing *is* the design: it is what lets your agent and a six-month-old
+  agent play a fair game.
 - Do not use `--allow-source-drift` to make a red test go away. It exists for
   audited emergencies; it taints every result row and flags contestants
   `*drift` in standings.
 - Do not report a win from a 20-game series.
+- Do not contort your idea to fit `MoveChooser` (§2, Path B). If the shape is
+  wrong, that is a finding about the architecture — report it.

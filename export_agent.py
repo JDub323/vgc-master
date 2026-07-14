@@ -88,7 +88,14 @@ def snapshot_source(dst):
 
 
 def copy_assets(src_dir, kind, ckpt, cfg):
-    """Copy behavior assets (and the checkpoint for net agents) into a bundle.
+    """Copy behavior assets (and any checkpoint) into a bundle.
+
+    Weights live under the gitignored ``artifacts/`` tree, so the source
+    snapshot never carries them; they must be copied explicitly. A checkpoint
+    is taken whenever the agent kind implies one or ``--ckpt`` names one, so an
+    agent with its own architecture and its own weights can still ship a
+    complete bundle. It always lands at ``artifacts/checkpoints/ckpt.pt``
+    inside the bundle.
 
     Returns the extra entrypoint args (checkpoint path, bundle-relative)."""
     art = src_dir / "artifacts"
@@ -97,7 +104,7 @@ def copy_assets(src_dir, kind, ckpt, cfg):
         p = cfg.artifacts_dir / asset
         if p.exists():
             shutil.copy2(p, art / asset)
-    if kind not in NEEDS_CHECKPOINT:
+    if kind not in NEEDS_CHECKPOINT and not ckpt:
         return []
     ckpt = Path(ckpt or cfg.checkpoint_dir / "ckpt_best.pt")
     missing = [str(p) for p in (ckpt, cfg.artifacts_dir / "vocab.json")
