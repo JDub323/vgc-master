@@ -37,9 +37,45 @@ the same target), the baseline crashes mid-series instead of degrading.
 **Suggested fix (v2):** `next(..., SlotAction("pass"))`. Behavior-changing
 for the frozen v1 baseline ⇒ `agents.max_damage.v2`.
 
+### 3. Action labels encode targets the search can never propose
+
+`data.py`'s `_event` infers a move's target from the protocol line, and that
+inference does not agree with the action space `actions.legal_slot_actions`
+enumerates from a sim request. Two cases, both measured at **8.7% of test
+transitions** (random 6,000-row sample, `evaluate.py` self-check):
+
+* **~62%** — a single-target (`normal`) move recorded as `T_AUTO`. `tcode`
+  defaults to `T_AUTO` and is only overridden when the move line carries a
+  target reference, so a move with no target ref (e.g. it fizzled) keeps the
+  default. `legal_slot_actions` offers `normal` moves only
+  `T_FOE_A`/`T_FOE_B`/`T_ALLY`, never `T_AUTO`.
+* **~37%** — a spread move (`allAdjacentFoes`) recorded with a *specific*
+  target. Showdown omits the `[spread]` tag when only one target is hit, so
+  the parser reads the explicit target instead. `legal_slot_actions` offers
+  spread moves only `T_AUTO`.
+
+Consequence: for those rows the model is trained to put mass on a joint index
+(e.g. Rock Slide at `T_FOE_B`, index 29) that search never reads, while search
+queries the index it was taught is rare (Rock Slide at `T_AUTO`, index 25).
+The prior therefore under-weights spread moves in exactly the positions where
+one target remains, and under-weights single-target moves whose label got the
+`T_AUTO` default. This is a live Elo cost, not only a metrics artifact.
+
+`evaluate.py`'s position-legal table works around it for *measurement* by
+projecting such a label onto the target codes the move admits and scoring the
+resulting set (`evaluation_common.PositionLegality.label_mask`), which is why
+its self-check reads 100%. That does not fix training.
+
+**Suggested fix:** canonicalize in the parser — resolve a spread move to
+`T_AUTO` regardless of the `[spread]` tag, and either resolve or drop a
+single-target move with no target reference. Touches `data.py` (a hashed
+behavior file) and requires re-parse + re-prep, so it wants an
+archive-generation boundary. Consider pairing it with partial labels for the
+~24% of transitions currently dropped for unobservable actions.
+
 ## Minor issues
 
-### 3. Policy-only Q values always read 0.0
+### 4. Policy-only Q values always read 0.0
 
 `DecoupledUCTSearcher.aggregate_root(..., policy_only=True)` zips
 `root.my_p` (used as the count column) with `root.my_w` (all zeros at an
@@ -47,7 +83,7 @@ unsearched root), so the `q` entries in `ChoiceInfo` — and the play.py
 dashboard — show 0.0 for the policy-only bot. Cosmetic, but it looks like a
 value-head failure.
 
-### 4. `sys.argv` parsing edges (all CLI scripts)
+### 5. `sys.argv` parsing edges (all CLI scripts)
 
 - The shared `opt()` helper does `args[args.index(flag) + 1]`; a value-taking
   flag passed as the last token crashes with `IndexError`.
@@ -57,14 +93,14 @@ value-head failure.
   both, and `--benchmark`'s optional count consumes the next token whenever
   one exists (`env.py --benchmark --selftest` raises on `int("--selftest")`).
 
-### 5. Bradley–Terry standings degenerate cases
+### 6. Bradley–Terry standings degenerate cases
 
 `benchmark.py standings`: a contestant with zero wins is clamped to rating
 `1e-9` and prints as roughly Elo −2100; disconnected pairing graphs within an
 era still "converge" but cross-component ratings are meaningless. `elo_diff`
 clips scores to [0.01, 0.99], capping any reported gap at ±798 Elo.
 
-### 6. Benchmark series are nondeterministic run-to-run
+### 7. Benchmark series are nondeterministic run-to-run
 
 Per-team win rates swing between runs of the same series: GPU/thread float
 nondeterminism in search (acknowledged in the module docstring), RNG'd forced
@@ -72,7 +108,7 @@ switches, and workers racing for jobs. A single 100-game series carries a
 roughly ±10% Wilson interval regardless — use `--repeat` before reading
 per-team splits as signal.
 
-### 7. The spreads prior ages silently
+### 8. The spreads prior ages silently
 
 `build_spreads.py` discovers Pikalytics' format key and data date by probing;
 both drift monthly. The filter degrades gracefully when

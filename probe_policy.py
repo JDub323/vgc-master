@@ -69,7 +69,7 @@ def report(name, mask, net, labels, ks=(6, 16)):
 
 def main(cfg=CFG):
     ckpt = sys.argv[1] if len(sys.argv) > 1 else cfg.checkpoint_dir / "ckpt_best.pt"
-    ds, _, _, net = load_test_predictions(ckpt, cfg)
+    ds, _, _, net, _ = load_test_predictions(ckpt, cfg)
     labels = ds.acts[:, 0].astype(int) * N_SLOT_ACTIONS + ds.acts[:, 1].astype(int)
     tok = PositionTokenizer.load(cfg)
     with open(cfg.artifacts_dir / "dex.json") as f:

@@ -169,15 +169,26 @@ HELP = {
         Evaluate a policy checkpoint on held-out behavior-cloning data and
         compare it with max-damage and random baselines.
 
-        Usage: python evaluate.py [CKPT] [--switches] [--aux] [--worst [N]]
+        Reports policy metrics twice: over the static mask (the historical
+        numbers recorded in EXPERIMENTS.md) and over the position-legal action
+        set the search's prior actually ranks. The two are not comparable.
+
+        Usage: python evaluate.py [CKPT] [--value] [--switches] [--aux]
+                                  [--worst [N]] [--no-legal]
 
         Arguments:
           CKPT               Checkpoint (default: ckpt_best.pt).
 
         Options:
+          --value            Value-head quality vs the final outcome: MSE,
+                             Brier, sign accuracy, calibration, confidence by
+                             game phase, and the constant/HP-differential
+                             floors.
           --switches         Print switch-probability and pruning diagnostics.
           --aux              Evaluate item, ability, and move prediction heads.
           --worst [N]        Show N worst policy errors (default: 20).
+          --no-legal         Skip the position-legal table (saves a pass over
+                             the test split).
           -h, --help         Show this help message and exit.
     """,
     "observe_game.py": """
