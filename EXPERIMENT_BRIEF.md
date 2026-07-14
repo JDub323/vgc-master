@@ -201,12 +201,12 @@ You are not done when the code works. You are done when all of these are true:
    why that is the experiment's result rather than its failure.
 3. An exported bundle exists **and you have stated where it lives** (which
    machine, which pile path) so it can be collected for the round robin.
-4. You have run at least a quick series against the anchor and reported it:
+4. You have run a quick series against the anchor and reported it:
    ```
-   python round_robin.py play exp-<short-name> <anchor> --quick 20
+   python round_robin.py play exp-<short-name> <anchor> --quick 10
    ```
-   `--quick 20` is triage, not a verdict — a full 100-game series carries a
-   roughly ±10% Wilson interval, so 20 games tells you only "not obviously
+   `--quick 10` is triage, not a verdict — a full 100-game series carries a
+   roughly ±10% Wilson interval, so 10 games tells you only "not obviously
    broken."
 5. A section appended to `EXPERIMENTS.md` (§6).
 6. Your lane (§1), and — if mergeable — **every shared file you touched**, or
@@ -214,7 +214,7 @@ You are not done when the code works. You are done when all of these are true:
 
 ## 6. What to write in `EXPERIMENTS.md`
 
-The code may be deleted. The conclusion must survive. `EXPERIMENTS.md` is the
+The code on the separate branch could get deleted. The conclusion must survive. `EXPERIMENTS.md` is the
 durable record; one-off training scripts and giant checkpoints are deliberately
 not maintained.
 
@@ -272,6 +272,6 @@ python round_robin.py play exp-<short-name> <anchor> --quick 10
 - Do not use `--allow-source-drift` to make a red test go away. It exists for
   audited emergencies; it taints every result row and flags contestants
   `*drift` in standings.
-- Do not report a win from a 20-game series.
+- Do not report a win from a 10-game series.
 - Do not contort your idea to fit `MoveChooser` (§2, Path B). If the shape is
   wrong, that is a finding about the architecture — report it.
