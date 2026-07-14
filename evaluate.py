@@ -23,6 +23,11 @@ CLI: python evaluate.py [checkpoint]
                   positions measure the same bias after search.)
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("evaluate.py"):
+        raise SystemExit(0)
+
 import sys
 
 import numpy as np
@@ -198,9 +203,6 @@ def aux_report(model, ds, cfg):
 
 
 def main(cfg=CFG):
-    from cli_help import show_help
-    if show_help("evaluate.py"):
-        return
     ckpt = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") \
         else cfg.checkpoint_dir / "ckpt_best.pt"
     ds, dmg_active, model, net = load_test_predictions(ckpt, cfg)

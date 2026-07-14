@@ -11,6 +11,11 @@ TensorBoard scalars plus a plain terminal table per epoch.
 CLI: python train.py [epochs]
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("train.py"):
+        raise SystemExit(0)
+
 import math
 import sys
 import time
@@ -129,9 +134,6 @@ def run_epoch(model, loader, device, opt=None, sched=None, cfg=CFG):
 
 def main(cfg=CFG):
     """Build/resume, train, validate, and checkpoint from CLI/config inputs."""
-    from cli_help import show_help
-    if show_help("train.py"):
-        return
     epochs = int(sys.argv[1]) if len(sys.argv) > 1 else cfg.epochs
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_float32_matmul_precision("high")     # TF32 outside autocast

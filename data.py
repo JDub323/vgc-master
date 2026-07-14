@@ -11,6 +11,11 @@ set-prediction head and for building the belief prior from the train split.
 CLI:  python data.py download | parse | prep | all
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("data.py"):
+        raise SystemExit(0)
+
 import hashlib
 import json
 import pickle
@@ -777,9 +782,6 @@ def prep(cfg=CFG, resume=False):
 
 
 if __name__ == "__main__":
-    from cli_help import show_help
-    if show_help("data.py"):
-        raise SystemExit(0)
     step = sys.argv[1] if len(sys.argv) > 1 else "all"
     if step in ("download", "all"):
         download()

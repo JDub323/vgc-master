@@ -20,6 +20,11 @@ Flags: --team NAME --bot search|policy|max-damage|random --games N
        --ckpt PATH --no-server --debug
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("play.py"):
+        raise SystemExit(0)
+
 import asyncio
 import json
 import random
@@ -265,9 +270,6 @@ def build_chooser(kind, ckpt, cfg, debug):
 
 def main(cfg=CFG):
     """Orchestrate team selection, local server, dashboard, and live games."""
-    from cli_help import show_help
-    if show_help("play.py"):
-        return
     from poke_env.ps_client import AccountConfiguration, ServerConfiguration
     args = sys.argv[1:]
 

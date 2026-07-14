@@ -42,6 +42,11 @@ CLI: python selfplay.py [--hours H] [--iters N] [--from ckpt] [--fresh]
 Self-play requires a joint-policy checkpoint, including the frozen baseline.
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("selfplay.py"):
+        raise SystemExit(0)
+
 import json
 import queue
 import random
@@ -482,9 +487,6 @@ def fork_model(src_ckpt, cfg, device):
 
 def main(cfg=CFG):
     """Run resumable generate/train/gate iterations from config and CLI flags."""
-    from cli_help import show_help
-    if show_help("selfplay.py"):
-        return
     if len(sys.argv) > 1 and sys.argv[1] == "--_gen":
         _gen_subprocess(cfg)
         return

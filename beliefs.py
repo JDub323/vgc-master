@@ -32,6 +32,11 @@ on held-out battles (depletion rate, whether the oracle set was even in the
 prior, and how much posterior mass it ends with).
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("beliefs.py"):
+        raise SystemExit(0)
+
 import json
 import random
 import re
@@ -1076,9 +1081,6 @@ def audit(max_battles, cfg=CFG):
 
 
 if __name__ == "__main__":
-    from cli_help import show_help
-    if show_help("beliefs.py"):
-        raise SystemExit(0)
     if "--audit" in sys.argv:
         i = sys.argv.index("--audit")
         audit(int(sys.argv[i + 1]) if i + 1 < len(sys.argv) else 500)

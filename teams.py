@@ -17,6 +17,11 @@ CLI:
   python teams.py --mine [N]      # top-N real teams from the parsed dataset
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("teams.py"):
+        raise SystemExit(0)
+
 import re
 import sys
 from collections import Counter
@@ -745,9 +750,6 @@ def mine(n, cfg=CFG):
 
 
 if __name__ == "__main__":
-    from cli_help import show_help
-    if show_help("teams.py"):
-        raise SystemExit(0)
     if "--list" in sys.argv:
         for name, arch in menu():
             print(f"{name:24s} {arch}")

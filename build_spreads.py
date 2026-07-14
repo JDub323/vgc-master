@@ -24,6 +24,11 @@ Percentages are stored as given (Pikalytics shows a truncated tail that need not
 sum to 100); beliefs.py selects and normalizes its top crossed builds, then
 reserves the configured ``spreads_any_weight`` for the off-list cushion.
 """
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("build_spreads.py"):
+        raise SystemExit(0)
+
 import datetime as dt
 import json
 import os
@@ -131,7 +136,4 @@ def build(cfg=CFG):
 
 
 if __name__ == "__main__":
-    from cli_help import show_help
-    if show_help("build_spreads.py"):
-        raise SystemExit(0)
     build()

@@ -16,6 +16,11 @@ CLI: python observe_game.py [--step] [--games N] [--p2 random] [--temp T]
      --cprofile out.prof
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("observe_game.py"):
+        raise SystemExit(0)
+
 import json
 import random
 import sys
@@ -150,9 +155,6 @@ def play_game(sc, bots, teams, cfg, step_mode, temperature, p2_random, rng):
 
 def main(cfg=CFG):
     """Load the versioned chooser and run one observed game from CLI flags."""
-    from cli_help import show_help
-    if show_help("observe_game.py"):
-        return
     args = sys.argv[1:]
 
     def opt(flag, default=None):

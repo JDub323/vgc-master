@@ -43,6 +43,11 @@ warns loudly, stamps every result row with the drifted files, and marks the
 contestant in report/standings.
 """
 
+if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("benchmark.py"):
+        raise SystemExit(0)
+
 import dataclasses
 import hashlib
 import json
@@ -685,9 +690,6 @@ def standings(cfg=CFG):
 
 def main(cfg=CFG):
     """Dispatch archive/list/rename/play/standings from ``sys.argv``."""
-    from cli_help import show_help
-    if show_help("benchmark.py"):
-        return
     args = sys.argv[1:]
     if not args:
         print(__doc__)
