@@ -14,7 +14,8 @@ def production_python_files():
     files = []
     for path in ROOT.rglob("*.py"):
         rel = path.relative_to(ROOT)
-        if any(part.startswith(".") or part in {"artifacts", "tests"}
+        if any(part.startswith(".") or part in {"artifacts", "tests",
+                                                "node_modules"}
                for part in rel.parts):
             continue
         files.append(path)

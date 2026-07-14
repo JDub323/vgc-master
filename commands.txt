@@ -81,6 +81,16 @@ python benchmark.py archive sp-iter8 --ckpt artifacts/checkpoints/selfplay/sp_it
 python benchmark.py play sp-iter8 my-agent-v1
 python benchmark.py standings
 
+6. Cross-branch tournaments: export bundles into the shared pile and play
+   them as subprocesses (works across incompatible branches; see
+   EXPERIMENT_BRIEF.md section 7)
+python export_agent.py rr-baseline --agent search --notes "frozen 1x"
+python export_agent.py rr-random --agent random
+python round_robin.py list
+python round_robin.py play rr-random rr-baseline --quick 10
+python round_robin.py star --anchor rr-baseline
+python round_robin.py standings
+
 # Model discovery is explicit: pytest loads no trained model; `current` and
 # scenarios/evaluate use ckpt_best.pt; sp_iter_*.pt must be named with --ckpt.
 # Copy the entire artifacts/benchmarks/<name>/ directory when transferring an

@@ -5,6 +5,71 @@ import textwrap
 
 
 HELP = {
+    "agent_server.py": """
+        Serve one chooser as a subprocess speaking the JSON-lines game
+        protocol on stdin/stdout (used by round_robin.py; not interactive).
+
+        Usage: python agent_server.py --agent KIND [options]
+
+        Options:
+          --agent KIND       search | policy | max-damage | random
+                             (experiment branches may add kinds).
+          --ckpt PATH        Checkpoint for net agents (default: ckpt_best.pt).
+          --name LABEL       Display name in the ready handshake.
+          --seed N           RNG seed for the chooser and forced switches.
+          -h, --help         Show this help message and exit.
+
+        Env:
+          VGC_NODE_DIR       Override Config.node_dir (shared Node install).
+    """,
+    "export_agent.py": """
+        Export the current working tree + behavior assets as one immutable,
+        self-contained agent bundle in the shared pile.
+
+        Usage: python export_agent.py NAME [options]
+
+        Options:
+          --agent KIND       search | policy | max-damage | random
+                             (default: search).
+          --ckpt PATH        Checkpoint to bundle (default: ckpt_best.pt).
+          --pile PATH        Pile directory (default: $VGC_PILE or ../vgc-pile).
+          --notes TEXT       Notes stored in the manifest.
+          --architecture L   Label shown in tournament standings.
+          --entrypoint CMD   Override the agent_server command line.
+          -h, --help         Show this help message and exit.
+    """,
+    "round_robin.py": """
+        Play cross-branch tournaments between exported agent bundles; each
+        contestant runs as its own subprocess, so incompatible branches can
+        play each other without merging.
+
+        Usage:
+          python round_robin.py list [--pile P]
+          python round_robin.py play A B [options]
+          python round_robin.py star [--anchor NAME] [options]
+          python round_robin.py all [options]
+          python round_robin.py standings [--pile P]
+
+        Commands:
+          list               Show bundles in the pile.
+          play A B           One series over the replica-team pairing grid.
+          star               Every bundle vs the anchor (default: baseline).
+          all                Full round robin (finalists only; expensive).
+          standings          Bradley-Terry table over <pile>/results.jsonl.
+
+        Options:
+          --pile PATH        Pile directory (default: $VGC_PILE or ../vgc-pile).
+          --workers N        Parallel game workers (default: 2).
+          --quick N          Random N-game subset instead of the full grid.
+          --repeat N         Repeat the pairing grid N times (default: 1).
+          --move-budget S    Enforce S seconds/move (late plays "default");
+                             omitted = record timing only.
+          --hang-timeout S   Silence budget before forfeit (default: 300).
+          --temp T           Action temperature sent to agents (default: 0).
+          --label TEXT       Tag for the run id and replay directory.
+          --no-save          Do not save replay log/HTML files.
+          -h, --help         Show this help message and exit.
+    """,
     "benchmark.py": """
         Archive immutable agents and run or summarize head-to-head benchmarks.
 

@@ -597,6 +597,43 @@ All gated behind flags; zero cost when off ([search/debug.py](search/debug.py)):
   damage calculator is the usual prep/search bottleneck and the cache hit
   rate says whether it is amortizing.
 
+## Cross-branch tournaments — the agent pile
+
+`benchmark.py` compares checkpoints that share this checkout's code. The
+*pile* compares agents that need not share any code: each contestant is an
+exported bundle run as a black-box subprocess speaking a small JSON-lines
+game protocol, so experiment branches with incompatible tokenizers, action
+spaces, or no neural net at all can still play each other — no merge needed.
+
+- [export_agent.py](export_agent.py) snapshots the working tree + behavior
+  assets (checkpoint, vocab, usage, dex, spreads — none of which travel by
+  git) into an immutable bundle under the pile (default `../vgc-pile`,
+  shared by sibling worktrees; override with `--pile` / `$VGC_PILE`).
+- [agent_server.py](agent_server.py) is the subprocess adapter: it wraps any
+  chooser behind the protocol (hello / game_start / lines / request →
+  choice / game_end). Experiment branches extend `build_chooser` with new
+  kinds; defaults reproduce `benchmark.run_game` behavior exactly.
+- [round_robin.py](round_robin.py) is the coordinator: it owns the one
+  battle engine both sides play on, assigns the replica teams with the same
+  pairing grid and side alternation as `benchmark.py`, and appends results
+  to `<pile>/results.jsonl` (they travel with the pile). Every row records
+  each side's seconds/move; `--move-budget` optionally enforces a per-move
+  clock. Crashed or hung agents forfeit, with stderr kept in `<pile>/logs/`.
+
+```bash
+python export_agent.py rr-baseline --agent search --notes "frozen 1x"
+python export_agent.py rr-random --agent random
+python round_robin.py list
+python round_robin.py play rr-random rr-baseline --quick 10
+python round_robin.py star --anchor rr-baseline   # connected BT graph, N series
+python round_robin.py standings
+```
+
+The star schedule (everyone vs one anchor) keeps the Bradley–Terry pairing
+graph connected at N series instead of N(N−1)/2; save `all` for finalists.
+See `EXPERIMENT_BRIEF.md` for the rules experiment branches must follow so
+their bundles compose here.
+
 ### File-by-file summary
 
 | file | what / why it exists |
@@ -624,6 +661,10 @@ All gated behind flags; zero cost when off ([search/debug.py](search/debug.py)):
 | [evaluate.py](evaluate.py) | Predictor metrics, headline pruned-set recall@k. Exists to certify that top-k pruning is safe before search trusts it. |
 | [evaluation_common.py](evaluation_common.py) | Shared held-out loading and policy metric calculations for evaluation scripts. |
 | [probe_policy.py](probe_policy.py) | Focused policy sanity and behavior probes used before expensive search benchmarks. |
+| [agent_server.py](agent_server.py) | Stdio adapter serving one chooser behind the JSON-lines game protocol. Exists so a contestant is a black-box process, not a Python import. |
+| [export_agent.py](export_agent.py) | Writes immutable, self-contained agent bundles (source snapshot + assets + manifest) into the shared pile. Exists because git carries code, never agents. |
+| [round_robin.py](round_robin.py) | Cross-branch tournament coordinator: one fair engine, subprocess contestants, pile-local ledger + Bradley-Terry standings. Exists so incompatible experiment branches can still be compared by Elo. |
+| [cli_help.py](cli_help.py) | Shared, dependency-free `-h`/`--help` text for every script entry point. |
 | [search/node.py](search/node.py) | Decoupled-UCT node (two PUCT tables). Exists because simultaneous turns demand per-player statistics — the whole reason vanilla UCT is banned here. |
 | [search/mcts.py](search/mcts.py) | Determinized DUCT reconstruction/orchestration; delegates encoding, priors, evaluation, and mechanics to versioned bricks. |
 | [search/debug.py](search/debug.py) | Phase profiler, cProfile hook, root particle monitor, per-det root tables. Exists so "why is it slow / why did it do that" has a flag instead of an archaeology session. |
