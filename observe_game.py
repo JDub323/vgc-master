@@ -150,6 +150,9 @@ def play_game(sc, bots, teams, cfg, step_mode, temperature, p2_random, rng):
 
 def main(cfg=CFG):
     """Load the versioned chooser and run one observed game from CLI flags."""
+    from cli_help import show_help
+    if show_help("observe_game.py"):
+        return
     args = sys.argv[1:]
 
     def opt(flag, default=None):

@@ -685,6 +685,9 @@ def standings(cfg=CFG):
 
 def main(cfg=CFG):
     """Dispatch archive/list/rename/play/standings from ``sys.argv``."""
+    from cli_help import show_help
+    if show_help("benchmark.py"):
+        return
     args = sys.argv[1:]
     if not args:
         print(__doc__)

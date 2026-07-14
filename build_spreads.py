@@ -131,4 +131,7 @@ def build(cfg=CFG):
 
 
 if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("build_spreads.py"):
+        raise SystemExit(0)
     build()

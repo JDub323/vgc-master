@@ -736,6 +736,9 @@ def run_live(ckpt, team_packed, n_games=1, ladder=False, cfg=CFG):
 
 
 if __name__ == "__main__":
+    from cli_help import show_help
+    if show_help("env.py"):
+        raise SystemExit(0)
     if "--dump-dex" in sys.argv:
         dump_dex()
     if "--benchmark" in sys.argv:

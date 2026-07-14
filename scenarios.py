@@ -394,6 +394,9 @@ def replay(searcher, cfg, i):
 
 def main():
     """Load optional checkpoint and dispatch scenarios/mine/replay CLI modes."""
+    from cli_help import show_help
+    if show_help("scenarios.py"):
+        return
     from search.debug import maybe_cprofile
     cfg = replace(CFG, n_determinizations=1)   # sets are known here
     if "--mine" in sys.argv:

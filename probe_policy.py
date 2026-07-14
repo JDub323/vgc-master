@@ -63,6 +63,9 @@ def report(name, mask, net, labels, ks=(6, 16)):
 
 
 def main(cfg=CFG):
+    from cli_help import show_help
+    if show_help("probe_policy.py"):
+        return
     ckpt = sys.argv[1] if len(sys.argv) > 1 else cfg.checkpoint_dir / "ckpt_best.pt"
     ds, _, _, net = load_test_predictions(ckpt, cfg)
     labels = ds.acts[:, 0].astype(int) * N_SLOT_ACTIONS + ds.acts[:, 1].astype(int)
