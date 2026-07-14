@@ -27,7 +27,7 @@ from agents.search.v1 import DecoupledUCTSearcher
 from agents.spec import AgentSpec, default_duct_spec
 from beliefs import OpponentBelief
 from config import CFG
-from search.mcts import Searcher, _joint_priors
+from search.mcts import _joint_priors
 from search.node import Node
 
 
@@ -40,7 +40,8 @@ def test_move_chooser_contract_and_named_v1_equivalence():
     fixture = Path(__file__).parent / "fixtures/tiny_random_agent/agent.json"
     chooser = REGISTRY.build(AgentSpec.load(fixture))
     assert isinstance(chooser, MoveChooser)
-    assert DeterminizedDUCTChooser.choose is Searcher.choose
+    assert REGISTRY.agents[default_duct_spec(CFG).agent_impl] \
+        is DeterminizedDUCTChooser
 
 
 def test_registry_applies_archived_brick_config():
@@ -197,10 +198,10 @@ def test_agent_spec_round_trip_paths_and_registry(tmp_path):
 def test_agent_spec_source_identity_fails_closed():
     spec = default_duct_spec(CFG)
     hashes = implementation_source_hashes(spec)
-    assert "agents/determinized_duct/v1.py" in hashes
     assert "search/mcts.py" in hashes
     tampered = dataclasses.replace(
-        spec, source={"files": dict(hashes) | {"search/mcts.py": "0" * 64}})
+        spec, source={"hash_scheme": HASH_SCHEME,
+                      "files": dict(hashes) | {"search/mcts.py": "0" * 64}})
     try:
         verify_implementation_sources(tampered)
     except RuntimeError:
@@ -218,20 +219,14 @@ def test_ast_hash_ignores_docstrings_but_not_logic(tmp_path):
     c.write_text('def f(x):\n    return x + 2\n')
     assert _normalized_source_hash(a) == _normalized_source_hash(b)
     assert _normalized_source_hash(a) != _normalized_source_hash(c)
-    assert _normalized_source_hash(a, "raw-v1") != _normalized_source_hash(b, "raw-v1")
 
 
 def test_source_verification_honors_scheme_and_drift_override():
     spec = default_duct_spec(CFG)
-    for scheme in ("raw-v1", HASH_SCHEME):
-        clean = dataclasses.replace(
-            spec, source={"hash_scheme": scheme,
-                          "files": implementation_source_hashes(spec, scheme=scheme)})
-        assert verify_implementation_sources(clean) == []
-    # legacy manifests (no hash_scheme) verify against raw bytes
-    legacy = dataclasses.replace(
-        spec, source={"files": implementation_source_hashes(spec, scheme="raw-v1")})
-    assert verify_implementation_sources(legacy) == []
+    clean = dataclasses.replace(
+        spec, source={"hash_scheme": HASH_SCHEME,
+                      "files": implementation_source_hashes(spec)})
+    assert verify_implementation_sources(clean) == []
     tampered = dataclasses.replace(
         spec, source={"hash_scheme": HASH_SCHEME,
                       "files": dict(implementation_source_hashes(spec))

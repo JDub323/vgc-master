@@ -28,9 +28,8 @@ MoveChooser (the Elo-rated agent)
     └── BeliefModel contract (constructed and updated by the game layer)
 ```
 
-`search.mcts.Searcher` remains a compatibility façade for old imports and old
-benchmark bundles. New code and new archives use the algorithmic chooser name
-and versioned IDs under `agents/`.
+`search.mcts.DeterminizedDUCTChooser` is the concrete orchestration class;
+archives address it through the versioned algorithmic ID under `agents/`.
 
 For manual review, [contracts.py](contracts.py) defines the shared dictionary
 and array shapes, while [DATA_CONTRACTS.md](DATA_CONTRACTS.md) catalogs every
@@ -120,7 +119,7 @@ selection is explicit:
 | `python -m pytest -q` | No trained checkpoint; code/bricks plus deterministic fixtures. |
 | `python scenarios.py` | `Config.checkpoint_dir/ckpt_best.pt` if it exists; otherwise uniform priors and terminal-only scenarios. |
 | `python evaluate.py` | `ckpt_best.pt` by default, or the explicit positional checkpoint argument. |
-| `python benchmark.py play current NAME` | `current` means exactly `ckpt_best.pt`; `NAME` is one explicit archive. |
+| `python benchmark.py play current` | The live `ckpt_best.pt` against the frozen 1x reference agent (`baseline` is the default opponent). |
 | `python benchmark.py list` | Every directory under `artifacts/benchmarks/` containing `meta.json`; it does not pick a winner or “latest” bundle. |
 | `python benchmark.py archive NAME --ckpt PATH` | The explicitly supplied checkpoint, or `ckpt_best.pt` when `--ckpt` is omitted. |
 
@@ -146,7 +145,7 @@ directory—not just `ckpt.pt`—to the same `artifacts/benchmarks/` location in
 another checkout. `benchmark.py list` discovers it automatically from
 `meta.json`; no database registration is needed. `registry.json` stores match
 history and ratings rather than agent definitions, so copy or merge it only if
-the historical results should move too.
+the results should move too.
 
 Transfer is easy between machines with the same source and runtime, but it is
 deliberately strict rather than universally plug-and-play. The destination
@@ -155,8 +154,7 @@ behavior-source hashes, and use the recorded Python, Torch, NumPy,
 Showdown, calc, and format identities. Machine-local paths such as the Node
 binary may differ. New archives record **AST-normalized (`ast-v1`) source
 hashes** — docstring/comment/formatting churn no longer invalidates an
-archive, while any logic edit still does; older manifests (no `hash_scheme`)
-keep verifying against raw file bytes. A real mismatch fails closed instead of
+archive, while any logic edit still does. A real mismatch fails closed instead of
 running the historical agent through newer behavior — unless
 `benchmark.py play ... --allow-source-drift` is passed explicitly, which runs
 the archive through current code, warns loudly, records the drifted files on
@@ -233,13 +231,12 @@ validator flags.
 
 The behavior-cloning pipeline above already produces the current layout-3,
 joint-head `ckpt_best.pt`. Promote that explicit checkpoint to a static agent,
-then use it as the starting point for self-play. An old layout-1/per-slot
-checkpoint can still be loaded and converted, but it is a compatibility path,
-not a prerequisite for a new run.
+then use it as the starting point for self-play. Historical tokenizer layouts,
+per-slot checkpoints, and checkpoint-only benchmark bundles are unsupported.
 
 ```bash
 # 0. freeze the evaluated BC model and all of its behavior assets
-python benchmark.py archive bc-layout3 --notes "layout-3 joint BC baseline"
+python benchmark.py list                  # includes the frozen `baseline`
 python benchmark.py list
 
 # 1. self-play (the main event): fork the BC net, generate -> train -> gate
@@ -248,13 +245,15 @@ python selfplay.py --iters 3         # or a fixed number of iterations
 python benchmark.py archive sp-iter8 --ckpt artifacts/checkpoints/selfplay/sp_iter_008.pt
 
 # 2. head-to-head: 100-game series (every ordered pairing of the 10 replica teams)
-python benchmark.py play bc-layout3 sp-iter8  # strength, 95% CI, and Elo
-python benchmark.py play current bc-layout3   # explicit ckpt_best vs the archive
+python benchmark.py play sp-iter8 baseline    # strength, 95% CI, and Elo
+python benchmark.py play current              # live experiment vs frozen 1x
 python benchmark.py standings              # Bradley-Terry ratings, segregated by era
 
 # diagnostics for the two model-quality items
 python evaluate.py --switches              # is switching underweighted in the prior?
 python scenarios.py                        # incl. two new diagnostic positions
+
+# prior ablation/capacity conclusions are preserved in EXPERIMENTS.md
 ```
 
 **Self-play** ([selfplay.py](selfplay.py)) is AlphaZero adapted to simultaneous, hidden-info
@@ -268,13 +267,11 @@ through one `BatchedEvaluator` per process that coalesces the threads' requests
 into batched GPU `predict_batch` calls — the GPU parallelism the simulator
 (real Node engine, CPU-bound) allows.
 
-**Joint policy head.** The policy is now one masked 39×39 softmax over both
+**Joint policy head.** The policy is one masked 39×39 softmax over both
 slots' actions instead of two independent per-slot softmaxes, so a slot's
 action is predicted in the context of its partner's (the factorized head could
-not, e.g., condition an attack on the partner's Rage Powder). Old per-slot
-checkpoints still load and play: `PolicyValueNet.from_slot` converts one into a
-joint head that reproduces the factorized distribution *bit-for-bit*, so
-archived phase-1 bundles remain valid opponents.
+not, e.g., condition an attack on the partner's Rage Powder). The frozen
+baseline and all supported checkpoints use this head.
 
 **Benchmarker** ([benchmark.py](benchmark.py)) freezes complete agents into immutable
 bundles under `artifacts/benchmarks/`. Each new bundle contains checkpoint,
@@ -286,12 +283,11 @@ games from different eras are kept apart so a logic change never silently
 pollutes the Elo. Standings group entries by chooser architecture while each
 individual `AgentSpec` receives its own rating.
 
-Compatibility contract:
+Archive contract:
 
 - New `AgentSpec` archives resolve every chooser/brick through an explicit
   allow-list. Unknown implementation IDs fail closed; they never fall back to
-  today's search code. Old checkpoint-only bundles still load through the
-  retained `SEARCHERS` compatibility registry.
+  today's search code. Pre-AgentSpec checkpoint-only bundles are unsupported.
 - Every behavior path in a new manifest must exist inside its bundle. Saved
   config and brick config are authoritative; current global behavior assets
   are never substituted. Machine-only paths (Node binary, data/checkpoint
@@ -300,7 +296,7 @@ Compatibility contract:
   engine or numerical-stack upgrade cannot silently change historical play.
   Resolved chooser/brick sources and behavior-critical shared modules are also
   hash-checked under the manifest's recorded scheme (`ast-v1` for new
-  archives — docstrings/comments don't count; raw bytes for legacy ones).
+  archives — docstrings/comments don't count).
   Mismatches fail closed by default; `--allow-source-drift` is the explicit,
   result-tainting override for exploratory runs. Preserve the recorded
   dependency environment and v1 source modules; add v2 modules for
@@ -431,7 +427,7 @@ Support modules entered here:
   of 561 tokens (current layout 3)** with a fixed layout (position i always means the same
   thing, so learned positional embeddings carry the structure and no
   schema/type embeddings are needed). Layout versions remain loadable from
-  archived `vocab.json` files (layout 1 used 537 tokens). Current blocks include
+  archived `vocab.json` files. Current blocks include
   field flags, 6+6 mon blocks with public Protect counters, per-opponent-mon
   belief tokens (modal item/nature, posterior mass, speed range, and bulk), and
   a 6x4x6 damage matrix as **(min, max)
@@ -457,7 +453,7 @@ downstream uses.
 ### 3. `python evaluate.py` — is pruning safe?
 
 Consumes the model's common joint-distribution inference contract (native joint
-head or a recombined legacy slot head), applies the same legality rules used by
+head), applies the same legality rules used by
 search, and scores the checkpoint on held-out battles against [models/baselines.py](models/baselines.py)
 (max-damage and random floors). The headline metric is **pruned-set
 recall@k**: how often the human's actual joint action sits inside the model's
@@ -494,7 +490,7 @@ are split between the reusable versioned brick and node implementation:
   perspective; the opponent table accumulates the negation.
 - [agents/search/v1.py](agents/search/v1.py) — traversal, simulation stepping,
   rollout, backup, and root aggregation. [search/mcts.py](search/mcts.py) keeps
-  reconstruction/orchestration and the legacy `Searcher` import façade. Per
+  reconstruction/orchestration in `DeterminizedDUCTChooser`. Per
   decision the chooser samples K opponent teams
   from the belief filter (**determinization**); reconstruct the public state
   once per sample with those sets as ground truth; run `sims_per_move / K`
@@ -619,15 +615,17 @@ All gated behind flags; zero cost when off ([search/debug.py](search/debug.py)):
 | [actions.py](actions.py) | Doubles slot/joint action space, masks, position legality, and Showdown choice strings. Exists so model, search, data and env all agree on what an action *is*. |
 | [damage.py](damage.py) | Cached JSON-lines bridge to `@smogon/calc`. Exists because damage math must match the games's exact formulas, forward (features) and backward (likelihoods). |
 | [beliefs.py](beliefs.py) | Particle filter over opponent sets + `--audit`. Exists to turn the hidden-information problem into concrete sampled sets the search can determinize over. |
-| [tokenizer.py](tokenizer.py) | Layout-versioned position tokenizer (current layout 3: 561 tokens) + vocab building. Archived vocab files reconstruct older layouts exactly. |
-| [models/policy_value.py](models/policy_value.py) | Small transformer: joint (or legacy per-slot) policy, value, aux set prediction. `from_slot` converts v1 checkpoints; `clean_state_dict` keeps torch.compile out of checkpoints. Exists as the learned prior/evaluator; small because search calls it constantly. |
+| [tokenizer.py](tokenizer.py) | Layout-3 position tokenizer (561 tokens) + vocab building. |
+| [models/policy_value.py](models/policy_value.py) | Small joint-policy transformer with value and aux set prediction; `clean_state_dict` keeps torch.compile out of checkpoints. |
 | [selfplay.py](selfplay.py) | AlphaZero-style self-play: batched-GPU generation, replay buffer, soft-target training, per-iteration gate. Exists to let the bot learn from its own play, not just human clones. |
-| [benchmark.py](benchmark.py) | Immutable full-agent archives, legacy bundle loading, model-vs-model series, and architecture-grouped Elo/BT standings. |
+| [benchmark.py](benchmark.py) | Frozen baseline plus immutable full-agent archives, model-vs-model series, and architecture-grouped Elo/BT standings. |
 | [models/baselines.py](models/baselines.py) | Batched random and max-damage predictor baselines used by offline evaluation; gameplay chooser versions live under `agents/`. |
 | [train.py](train.py) | Behavior cloning loop with AMP/cosine/resume. Exists to fit the network; nothing else trains anything. |
 | [evaluate.py](evaluate.py) | Predictor metrics, headline pruned-set recall@k. Exists to certify that top-k pruning is safe before search trusts it. |
+| [evaluation_common.py](evaluation_common.py) | Shared held-out loading and policy metric calculations for evaluation scripts. |
+| [probe_policy.py](probe_policy.py) | Focused policy sanity and behavior probes used before expensive search benchmarks. |
 | [search/node.py](search/node.py) | Decoupled-UCT node (two PUCT tables). Exists because simultaneous turns demand per-player statistics — the whole reason vanilla UCT is banned here. |
-| [search/mcts.py](search/mcts.py) | Behavior-compatible reconstruction/orchestration and legacy `Searcher` façade; delegates encoding, priors, evaluation, and mechanics to versioned bricks. |
+| [search/mcts.py](search/mcts.py) | Determinized DUCT reconstruction/orchestration; delegates encoding, priors, evaluation, and mechanics to versioned bricks. |
 | [search/debug.py](search/debug.py) | Phase profiler, cProfile hook, root particle monitor, per-det root tables. Exists so "why is it slow / why did it do that" has a flag instead of an archaeology session. |
 | [scenarios.py](scenarios.py) | Endgame assertions (mixed-strategy gate) + real-replay endgame mining. Exists so search regressions fail loudly instead of costing Elo silently. |
 | [observe_game.py](observe_game.py) | Step-through self-play viewer of beliefs/predictions/strategy/value. Exists because a bot you can't watch thinking can't be debugged. |

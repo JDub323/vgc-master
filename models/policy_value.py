@@ -4,26 +4,17 @@ predictions of the opponent's hidden sets (trained on oracle team-sheet labels
 to shape representations and sanity-check the particle filter — not used by
 search).
 
-Two policy-head architectures, selected by hp["policy_head"]:
-
-  "slot"  (v1) — two independent 39-way softmaxes, one per slot, recombined
-          into a joint distribution by outer product. Checkpoints trained
-          before the joint head load and play exactly as before.
-  "joint" (v2) — one 39x39 masked softmax over joint actions. A slot's action
-          is predicted in the context of its partner's action, which the
-          factorized head cannot express (e.g. an attack that only makes
-          sense under partner's Rage Powder).
-
-Everything downstream consumes one contract: predict_batch returns a
-normalized joint distribution [B, N_JOINT_ACTIONS] for either head, so search,
-evaluation and benchmarking are architecture-blind.
+The joint policy head is a 39x39 masked softmax, so each slot's action is
+predicted in the context of its partner's action. Historical per-slot
+checkpoints are intentionally unsupported; the frozen baseline uses this
+joint-head architecture.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from actions import N_JOINT_ACTIONS, N_SLOT_ACTIONS, static_joint_mask
+from actions import N_JOINT_ACTIONS, static_joint_mask
 from config import CFG, config_from_snapshot, config_snapshot
 
 
@@ -34,12 +25,11 @@ class PolicyValueNet(nn.Module):
     """Transformer joint-policy/value/hidden-set auxiliary network."""
 
     def __init__(self, vocab_size, n_tokens, opp_positions,
-                 n_moves, n_items, n_abilities, cfg=CFG, policy_head="slot",
+                 n_moves, n_items, n_abilities, cfg=CFG, policy_head="joint",
                  model_cfg=None):
         super().__init__()
-        # "slot" default keeps **hp construction of old checkpoints working;
-        # new models are built with policy_head="joint" explicitly.
-        assert policy_head in ("slot", "joint"), policy_head
+        if policy_head != "joint":
+            raise ValueError("only joint-policy checkpoints are supported")
         model_cfg = model_cfg or {k: getattr(cfg, k) for k in MODEL_CFG_FIELDS}
         self.cfg_snapshot = config_snapshot(cfg)
         self.cfg_snapshot.update({k: model_cfg[k] for k in MODEL_CFG_FIELDS})
@@ -58,10 +48,7 @@ class PolicyValueNet(nn.Module):
             activation="gelu", batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, int(model_cfg["n_layers"]))
         self.norm = nn.LayerNorm(d)
-        if policy_head == "joint":
-            self.joint_head = nn.Linear(d, N_JOINT_ACTIONS)
-        else:
-            self.slot_heads = nn.Linear(d, 2 * N_SLOT_ACTIONS)
+        self.joint_head = nn.Linear(d, N_JOINT_ACTIONS)
         self.value_head = nn.Linear(d, 1)
         self.register_buffer("opp_pos", torch.tensor(list(opp_positions)))
         # persistent=False: deterministic from actions.py, kept out of
@@ -74,16 +61,10 @@ class PolicyValueNet(nn.Module):
         self.moves_head = nn.Linear(d, n_moves + 1)
 
     def forward(self, tokens):
-        """Returns (policy logits, value, aux). Policy logits are
-        [B, N_JOINT_ACTIONS] for the joint head, [B, 2, N_SLOT_ACTIONS] for
-        the slot head — training branches on the shape, inference goes
-        through joint_dist() and never sees the difference."""
+        """Return joint-policy logits, scalar value, and set predictions."""
         h = self.encoder(self.emb(tokens) + self.pos)
         cls = self.norm(h[:, 0])
-        if self.policy_head == "joint":
-            pol = self.joint_head(cls)
-        else:
-            pol = self.slot_heads(cls).view(-1, 2, N_SLOT_ACTIONS)
+        pol = self.joint_head(cls)
         value = torch.tanh(self.value_head(cls)).squeeze(-1)
         opp_h = h[:, self.opp_pos]                       # [B, 6, d]
         aux = (self.item_head(opp_h), self.ability_head(opp_h),
@@ -91,13 +72,8 @@ class PolicyValueNet(nn.Module):
         return pol, value, aux
 
     def joint_dist(self, pol):
-        """Policy logits (either head) -> normalized joint distribution
-        [B, N_JOINT_ACTIONS] over statically-legal joint actions."""
-        if self.policy_head == "joint":
-            return F.softmax(pol.masked_fill(~self.joint_mask, float("-inf")), -1)
-        pa, pb = F.softmax(pol[:, 0], -1), F.softmax(pol[:, 1], -1)
-        j = (pa[:, :, None] * pb[:, None, :]).flatten(1) * self.joint_mask
-        return j / j.sum(-1, keepdim=True)
+        """Normalize logits over statically legal joint actions."""
+        return F.softmax(pol.masked_fill(~self.joint_mask, float("-inf")), -1)
 
     @torch.no_grad()
     def predict_batch(self, tokens):
@@ -129,30 +105,6 @@ class PolicyValueNet(nn.Module):
         m = cls(**hp, cfg=load_cfg).to(device)
         m.load_state_dict(strip_compile_prefix(ck["state"]))
         return m
-
-    @classmethod
-    def from_slot(cls, slot_model, cfg=CFG):
-        """Convert a v1 per-slot model into a joint-head model that computes
-        the SAME joint distribution at conversion time: joint logit(a, b) =
-        slot_a logit(a) + slot_b logit(b), which softmaxes to the outer
-        product. A warm start for fine-tuning (self-play or BC) without
-        retraining the trunk from scratch."""
-        assert slot_model.policy_head == "slot"
-        hp = dict(slot_model.hp)
-        hp["policy_head"] = "joint"
-        m = cls(**hp, cfg=cfg)
-        trunk = {k: v for k, v in slot_model.state_dict().items()
-                 if not k.startswith("slot_heads")}
-        m.load_state_dict(trunk, strict=False)
-        W, b = slot_model.slot_heads.weight.detach(), slot_model.slot_heads.bias.detach()
-        A = N_SLOT_ACTIONS
-        wa, wb = W[:A], W[A:]                            # [A, d] each
-        m.joint_head.weight.data.copy_(
-            (wa.unsqueeze(1) + wb.unsqueeze(0)).reshape(A * A, -1))
-        m.joint_head.bias.data.copy_(
-            (b[:A].unsqueeze(1) + b[A:].unsqueeze(0)).reshape(-1))
-        return m.to(next(slot_model.parameters()).device)
-
 
 def clean_state_dict(model):
     """State dict with eager keys regardless of torch.compile. Compiling wraps

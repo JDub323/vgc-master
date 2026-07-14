@@ -11,5 +11,3 @@ ENCODER_V1 = "agents.encoding.v1.TokenPositionEncoder"
 PRIOR_V1 = "agents.priors.v1.PolicyValuePrior"
 EVALUATOR_V1 = "agents.evaluators.v1.PolicyValueLeafEvaluator"
 SEARCHER_V1 = "agents.search.v1.DecoupledUCTSearcher"
-
-LEGACY_SEARCH_V1 = "search.mcts.Searcher/current-python-v1"

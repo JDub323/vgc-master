@@ -122,15 +122,8 @@ class DetGame:
         b.destroy()
 
 
-class Searcher:
-    """Compatibility name for the v1 determinized DUCT chooser.
-
-    New archives use the algorithmic
-    ``agents.determinized_duct.v1.DeterminizedDUCTChooser`` implementation ID.
-    This class remains import-compatible for existing callers and old
-    ``search_impl`` archives while delegating swappable work to versioned
-    bricks.
-    """
+class DeterminizedDUCTChooser:
+    """Determinized decoupled-UCT chooser composed from versioned bricks."""
 
     def __init__(self, model, tok, cfg=CFG, seed=0, debug=False, sidecar=None,
                  position_encoder=None, policy_prior=None,
@@ -277,10 +270,6 @@ class Searcher:
         print(belief_report(belief))
 
     # -- internals -------------------------------------------------------
-    def _simulate(self, det):
-        """Compatibility hook; new code calls the injected search brick."""
-        return self.searcher.simulate(self, det)
-
     def _leaf_value(self, det, b, trk, leaf):
         """Value backed up from a freshly expanded leaf. With rollout_depth=1
         this is just the net value at the leaf (AlphaZero default). With depth D

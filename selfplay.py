@@ -39,9 +39,7 @@ checkpoints. Archive milestones with `python benchmark.py archive`.
 CLI: python selfplay.py [--hours H] [--iters N] [--from ckpt] [--fresh]
                         [--games G] [--procs P] [--workers W] [--sims S]
                         [--no-gate]
-Forking a v1 (per-slot) checkpoint converts it with PolicyValueNet.from_slot
-— the joint head starts as the exact factorized distribution and learns the
-correlations from there.
+Self-play requires a joint-policy checkpoint, including the frozen baseline.
 """
 
 import json
@@ -475,12 +473,10 @@ def gate(model_new, model_old, tok, cfg, n_games, workers=4):
 # ---------------------------------------------------------------------------
 
 def fork_model(src_ckpt, cfg, device):
-    """BC checkpoint -> self-play starting point. v1 per-slot checkpoints are
-    converted to the joint head (function-equivalent warm start)."""
+    """Load a joint-policy BC checkpoint as the self-play starting point."""
     m = PolicyValueNet.load(src_ckpt, cfg, device)
-    if m.policy_head == "slot":
-        print(f"converting per-slot checkpoint {src_ckpt} to joint head")
-        m = PolicyValueNet.from_slot(m, cfg)
+    if m.policy_head != "joint":
+        raise ValueError("self-play requires a joint-policy checkpoint")
     return m
 
 

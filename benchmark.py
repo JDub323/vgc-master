@@ -5,8 +5,8 @@ vocab.json + config + metadata + behavior assets — in
 artifacts/benchmarks/<name>/. It still requires the recorded retained Python
 source and external runtime identities; loading verifies both rather than
 silently substituting current behavior.
-Bundles are never modified or deleted; each records the git commit, the search
-implementation id, and an "era" hash of the search/particle config, so results
+Bundles are never modified or deleted; each records the git commit, agent
+implementation ID, and an "era" hash of the search/particle config, so results
 across logic changes are flagged instead of silently mixed. Archive the current
 run BEFORE landing changes that invalidate it (tokenizer layout, particle
 logic).
@@ -16,30 +16,28 @@ teams (10 teams -> 100 games, mirrors included): contestant A plays team i,
 B plays team j, for all (i, j). Both orders occur, so no team assignment
 favors a side; p1/p2 alternates by game parity. Each archived contestant loads
 its own model architecture, tokenizer layout, search/belief cfg, and archived
-usage/dex/spread assets. New bundles also carry an AgentSpec whose versioned
-chooser and brick IDs are resolved through an explicit registry; old bundles
-without one retain their legacy search_impl compatibility path.
+usage/dex/spread assets. Every bundle carries an AgentSpec whose versioned
+chooser and brick IDs are resolved through an explicit registry.
 
 CLI: python benchmark.py archive <name> [--ckpt path] [--notes "..."]
-     python benchmark.py rename <old> <new>
      python benchmark.py list
-     python benchmark.py play <A> <B> [--sims N] [--workers W] [--temp T]
+     python benchmark.py play <A> [B=baseline] [--sims N] [--workers W] [--temp T]
                                       [--repeat R] [--quick N]
                                       [--teams t1,t2,...] [--spectate]
                                       [--port P] [--no-save]
                                       [--allow-source-drift]
      python benchmark.py standings
-"current" as a contestant name means the live artifacts (ckpt_best.pt +
-vocab.json), so you can fight work-in-progress against any archive.
+"baseline" is the frozen 1x reference agent. "current" means the live
+artifacts (ckpt_best.pt + vocab.json), so the normal experiment is
+`python benchmark.py play current baseline`.
 Every play run saves .log + browser-openable .html replays under
 artifacts/replays/<A>_vs_<B>/ (--no-save to skip). --spectate also serves a
 live dashboard (http://localhost:PORT) to flip between parallel games.
 --teams restricts to games where team A is one of the named teams, replaying
 those matchups with their original game seeds (the per-game seed index is
 preserved; outcomes reproduce up to GPU/thread float nondeterminism in search).
-Source identity: new archives record AST-normalized ("ast-v1") hashes, so
-comment/docstring churn does not invalidate them; legacy raw-byte manifests
-verify under their recorded scheme. A real mismatch still fails closed unless
+Source identity: archives record AST-normalized ("ast-v1") hashes, so
+comment/docstring churn does not invalidate them. A real mismatch still fails closed unless
 --allow-source-drift is passed, which runs the archive through CURRENT code,
 warns loudly, stamps every result row with the drifted files, and marks the
 contestant in report/standings.
@@ -62,7 +60,7 @@ import torch
 import numpy as np
 
 import teams as teams_mod
-from agents.ids import DETERMINIZED_DUCT_V1, LEGACY_SEARCH_V1
+from agents.ids import DETERMINIZED_DUCT_V1
 from agents.registry import (HASH_SCHEME, build_agent,
                              implementation_source_hashes,
                              verify_implementation_sources)
@@ -73,7 +71,6 @@ from config import (CFG, config_diff, config_from_snapshot, config_snapshot,
 from env import Sidecar, SidecarBattle, pack_team, random_choice
 from models.policy_value import MODEL_CFG_FIELDS, PolicyValueNet
 from observe_game import Bot
-from search.mcts import Searcher
 from tokenizer import PositionTokenizer
 
 # config fields that change what a game means; results across different era
@@ -85,10 +82,9 @@ ERA_FIELDS = ("n_particles", "resample_floor", "damage_tolerance",
               "spreads_any_weight", "factored_fallback", "top_k_actions",
               "n_determinizations", "solve_endgame_at", "c_puct",
               "rollout_depth", "format_id")
-SEARCH_IMPL = LEGACY_SEARCH_V1
 AGENT_IMPL = DETERMINIZED_DUCT_V1
+BASELINE_NAME = "baseline"
 ARCHIVE_ASSETS = ("usage_stats.json", "dex.json", "spreads.json")
-SEARCHERS = {SEARCH_IMPL: Searcher}
 
 
 def era_hash(cfg=CFG):
@@ -216,42 +212,15 @@ def archive(name, ckpt=None, notes="", cfg=CFG):
         "name": name, "created": date.today().isoformat(),
         "source_ckpt": str(src_ckpt), "git": commit,
         "era": era_hash(archive_cfg), "notes": notes,
-        "search_impl": SEARCH_IMPL,
         "agent_impl": spec.agent_impl,
         "architecture": spec.architecture,
         "agent_spec": AGENT_SPEC_FILENAME,
-        "policy_head": hp.get("policy_head", "slot"),
+        "policy_head": hp["policy_head"],
         "n_tokens": hp["n_tokens"],
         "layout": json.loads((dst / "vocab.json").read_text()).get("layout", 1),
     }, indent=1))
-    print(f"archived '{name}': head={hp.get('policy_head', 'slot')}, "
+    print(f"archived '{name}': head={hp['policy_head']}, "
           f"n_tokens={hp['n_tokens']}, era={era_hash(archive_cfg)}")
-
-
-def rename(old, new, cfg=CFG):
-    """Rename an archived bundle and migrate every registry result that
-    references it, so standings/history stay consistent under the new name."""
-    src, dst = bench_dir(cfg) / old, bench_dir(cfg) / new
-    assert src.exists(), f"no bundle named '{old}'"
-    assert not dst.exists(), f"'{new}' already exists"
-    src.rename(dst)
-    meta = json.loads((dst / "meta.json").read_text())
-    meta["name"] = new
-    (dst / "meta.json").write_text(json.dumps(meta, indent=1))
-    spec_path = dst / AGENT_SPEC_FILENAME
-    if spec_path.exists():
-        spec_data = json.loads(spec_path.read_text())
-        spec_data.setdefault("archive", {})["name"] = new
-        spec_path.write_text(json.dumps(spec_data, indent=2) + "\n")
-    reg = load_registry(cfg)
-    migrated = 0
-    for r in reg["results"]:
-        for side in ("a", "b"):
-            if r.get(side) == old:
-                r[side] = new
-                migrated += 1
-    save_registry(reg, cfg)
-    print(f"renamed '{old}' -> '{new}'  ({migrated} registry entries migrated)")
 
 
 def list_bundles(cfg=CFG):
@@ -270,7 +239,7 @@ def list_bundles(cfg=CFG):
           f"{'tokens':7s} {'era':11s} notes")
     for m in rows:
         era = m["era"] + ("" if m["era"] == cur_era else " (old!)")
-        arch = m.get("architecture", "legacy Searcher")
+        arch = m["architecture"]
         print(f"{m['name']:16s} {arch:26.26s} {m['created']:11s} "
               f"{m['policy_head']:6s} {m['n_tokens']:<7d} {era:11s} "
               f"{m.get('notes', '')}")
@@ -284,7 +253,7 @@ class Contestant:
     """A complete frozen chooser specification plus its loaded neural assets."""
 
     def __init__(self, name, cfg=CFG, device="cpu", allow_source_drift=False):
-        """Load ``current`` or one named legacy/static archive for inference."""
+        """Load ``current``, the frozen ``baseline``, or a named archive."""
         self.name = name
         self.source_drift = []
         if name == "current":
@@ -306,35 +275,29 @@ class Contestant:
             self.meta = json.loads((d / "meta.json").read_text())
             self.bundle_dir = d
             spec_path = d / self.meta.get("agent_spec", AGENT_SPEC_FILENAME)
-            self.static_spec = spec_path.exists()
-            if self.static_spec:
-                self.agent_spec = AgentSpec.load(spec_path)
-                missing = sorted(
-                    path for path in self.agent_spec.behavior_paths()
-                    if not self.agent_spec.resolve(d, path).exists())
-                if missing:
-                    raise FileNotFoundError(
-                        f"{name}: static archive is incomplete: {missing}")
-                from agents.registry import REGISTRY
-                REGISTRY.validate(self.agent_spec)
-                self.source_drift = verify_implementation_sources(
-                    self.agent_spec, allow_drift=allow_source_drift)
-                cfg_path = self.agent_spec.resolve(d, self.agent_spec.config)
-                self.archive_cfg = load_config_snapshot(cfg_path, base=cfg)
-                self.archive_cfg = config_from_agent_spec(
-                    self.archive_cfg, self.agent_spec)
-                ckpt = self.agent_spec.resolve(
-                    d, self.agent_spec.assets["checkpoint"])
-                vocab = self.agent_spec.resolve(
-                    d, self.agent_spec.assets["vocab"])
-                _verify_runtime(self.agent_spec, cfg)
-            else:
-                # Old checkpoint-only archives retain their conservative
-                # search_impl dispatch and global-asset fallback.
-                self.agent_spec = None
-                ckpt, vocab = d / "ckpt.pt", d / "vocab.json"
-                self.archive_cfg = load_config_snapshot(
-                    d / "config.json", base=cfg)
+            if not spec_path.exists():
+                raise ValueError(f"{name}: unsupported pre-AgentSpec archive")
+            self.static_spec = True
+            self.agent_spec = AgentSpec.load(spec_path)
+            missing = sorted(
+                path for path in self.agent_spec.behavior_paths()
+                if not self.agent_spec.resolve(d, path).exists())
+            if missing:
+                raise FileNotFoundError(
+                    f"{name}: static archive is incomplete: {missing}")
+            from agents.registry import REGISTRY
+            REGISTRY.validate(self.agent_spec)
+            self.source_drift = verify_implementation_sources(
+                self.agent_spec, allow_drift=allow_source_drift)
+            cfg_path = self.agent_spec.resolve(d, self.agent_spec.config)
+            self.archive_cfg = load_config_snapshot(cfg_path, base=cfg)
+            self.archive_cfg = config_from_agent_spec(
+                self.archive_cfg, self.agent_spec)
+            ckpt = self.agent_spec.resolve(
+                d, self.agent_spec.assets["checkpoint"])
+            vocab = self.agent_spec.resolve(
+                d, self.agent_spec.assets["vocab"])
+            _verify_runtime(self.agent_spec, cfg)
         self.model_cfg = _runtime_cfg(
             self.archive_cfg, cfg, self.bundle_dir,
             strict_archive=self.static_spec)
@@ -437,18 +400,9 @@ def _print_cfg_diffs(a, b, current_cfg):
 
 def _make_searcher(contestant, run_cfg):
     """Construct the exact registered chooser required by ``contestant``."""
-    if contestant.agent_spec is not None:
-        return build_agent(
-            contestant.agent_spec, model=contestant.model,
-            tokenizer=contestant.tok, cfg=run_cfg, apply_spec_config=False)
-    impl = contestant.meta.get("search_impl") or SEARCH_IMPL
-    try:
-        cls = SEARCHERS[impl]
-    except KeyError as exc:
-        raise KeyError(
-            f"archive requires unavailable legacy search implementation: {impl}") \
-            from exc
-    return cls(contestant.model, contestant.tok, run_cfg)
+    return build_agent(
+        contestant.agent_spec, model=contestant.model,
+        tokenizer=contestant.tok, cfg=run_cfg, apply_spec_config=False)
 
 
 def run_game(sc, bots, sets_by_side, cfg, temperature, rng, max_turns=300,
@@ -592,15 +546,10 @@ def run_series(name_a, name_b, cfg=CFG, sims=None, temperature=0.0,
                        "era_run_a": era_hash(cfg_a),
                        "era_run_b": era_hash(cfg_b),
                        "git": git_commit(),
-                       "search_impl": SEARCH_IMPL,
-                       "agent_impl_a": A.meta.get(
-                           "agent_impl", A.meta.get("search_impl", SEARCH_IMPL)),
-                       "agent_impl_b": B.meta.get(
-                           "agent_impl", B.meta.get("search_impl", SEARCH_IMPL)),
-                       "architecture_a": A.meta.get(
-                           "architecture", "legacy Searcher"),
-                       "architecture_b": B.meta.get(
-                           "architecture", "legacy Searcher")}
+                       "agent_impl_a": A.meta["agent_impl"],
+                       "agent_impl_b": B.meta["agent_impl"],
+                       "architecture_a": A.meta["architecture"],
+                       "architecture_b": B.meta["architecture"]}
                 if A.source_drift or B.source_drift:
                     res["source_drift_a"] = list(A.source_drift)
                     res["source_drift_b"] = list(B.source_drift)
@@ -711,8 +660,8 @@ def standings(cfg=CFG):
         family = {}
         tainted = set()
         for row in rows:
-            family.setdefault(row["a"], row.get("architecture_a", "legacy Searcher"))
-            family.setdefault(row["b"], row.get("architecture_b", "legacy Searcher"))
+            family.setdefault(row["a"], row["architecture_a"])
+            family.setdefault(row["b"], row["architecture_b"])
             if row.get("source_drift_a"):
                 tainted.add(row["a"])
             if row.get("source_drift_b"):
@@ -749,11 +698,11 @@ def main(cfg=CFG):
         archive(args[1], ckpt=opt("--ckpt"), notes=opt("--notes", ""), cfg=cfg)
     elif cmd == "list":
         list_bundles(cfg)
-    elif cmd == "rename":
-        rename(args[1], args[2], cfg=cfg)
     elif cmd == "play":
         teams_opt = opt("--teams")
-        run_series(args[1], args[2], cfg,
+        opponent = args[2] if len(args) > 2 and not args[2].startswith("--") \
+            else BASELINE_NAME
+        run_series(args[1], opponent, cfg,
                    sims=int(opt("--sims", 0)) or None,
                    temperature=float(opt("--temp", 0.0)),
                    workers=int(opt("--workers", 4)),

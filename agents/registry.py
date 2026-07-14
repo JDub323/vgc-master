@@ -10,7 +10,7 @@ from agents.beliefs.v1 import OpponentBelief
 from agents.encoding.v1 import TokenPositionEncoder
 from agents.evaluators.v1 import PolicyValueLeafEvaluator
 from agents.ids import (BELIEF_V1, DETERMINIZED_DUCT_V1, ENCODER_V1,
-                        EVALUATOR_V1, LEGACY_SEARCH_V1, MAX_DAMAGE_V1,
+                        EVALUATOR_V1, MAX_DAMAGE_V1,
                         POLICY_ONLY_V1, PRIOR_V1, RANDOM_V1, SEARCHER_V1)
 from agents.max_damage.v1 import MaxDamageChooser
 from agents.policy_only.v1 import PolicyOnlyChooser
@@ -18,7 +18,6 @@ from agents.priors.v1 import PolicyValuePrior
 from agents.random.v1 import RandomChooser
 from agents.search.v1 import DecoupledUCTSearcher
 from agents.spec import AgentSpec, config_from_agent_spec
-from search.mcts import Searcher as LegacySearcher
 
 
 class AgentRegistry:
@@ -51,8 +50,7 @@ class AgentRegistry:
             if brick.impl not in self.bricks:
                 raise KeyError(
                     f"unregistered {name} implementation: {brick.impl}")
-        if spec.agent_impl in (
-                DETERMINIZED_DUCT_V1, POLICY_ONLY_V1, LEGACY_SEARCH_V1):
+        if spec.agent_impl in (DETERMINIZED_DUCT_V1, POLICY_ONLY_V1):
             required = {
                 "belief_model", "position_encoder", "policy_prior",
                 "leaf_evaluator", "searcher",
@@ -107,7 +105,6 @@ REGISTRY.register_agent(DETERMINIZED_DUCT_V1, DeterminizedDUCTChooser)
 REGISTRY.register_agent(POLICY_ONLY_V1, PolicyOnlyChooser)
 REGISTRY.register_agent(MAX_DAMAGE_V1, MaxDamageChooser)
 REGISTRY.register_agent(RANDOM_V1, RandomChooser)
-REGISTRY.register_agent(LEGACY_SEARCH_V1, LegacySearcher)
 REGISTRY.register_brick(BELIEF_V1, OpponentBelief)
 REGISTRY.register_brick(ENCODER_V1, TokenPositionEncoder)
 REGISTRY.register_brick(PRIOR_V1, PolicyValuePrior)
@@ -125,12 +122,8 @@ BEHAVIOR_SOURCE_FILES = (
 )
 
 
-# Source-identity hash schemes. Legacy manifests recorded raw file bytes
-# ("raw-v1", implied when a manifest has no hash_scheme); new manifests record
-# "ast-v1": a hash of the docstring-stripped AST, so comments/docstrings/
-# formatting churn does not invalidate an archive while any logic edit still
-# fails closed.
-HASH_SCHEME_RAW = "raw-v1"
+# Source identity uses docstring-stripped ASTs, so comments/docstrings and
+# formatting do not invalidate an archive while logic edits still fail closed.
 HASH_SCHEME_AST = "ast-v1"
 HASH_SCHEME = HASH_SCHEME_AST
 
@@ -152,9 +145,9 @@ def _strip_docstrings(tree):
 
 
 def _normalized_source_hash(path, scheme=HASH_SCHEME):
-    """SHA-256 of one source file under ``scheme`` (raw bytes or AST)."""
+    """Return the AST-normalized SHA-256 identity of one source file."""
     data = Path(path).read_bytes()
-    if scheme == HASH_SCHEME_RAW or Path(path).suffix != ".py":
+    if Path(path).suffix != ".py":
         return hashlib.sha256(data).hexdigest()
     if scheme != HASH_SCHEME_AST:
         raise ValueError(f"unknown source hash scheme: {scheme!r}")
@@ -194,16 +187,17 @@ def implementation_source_hashes(spec, repo_root=None, scheme=HASH_SCHEME):
 def verify_implementation_sources(spec, repo_root=None, allow_drift=False):
     """Compare manifest-recorded source hashes against this checkout.
 
-    Verification runs under the scheme the manifest recorded
-    (``source["hash_scheme"]``; absent means legacy raw bytes). Returns the
-    sorted list of drifted paths — empty when identity holds. A non-empty
+    Manifests must record the current AST hash scheme. Returns the sorted list
+    of drifted paths — empty when identity holds. A non-empty
     result raises unless ``allow_drift`` is true, in which case a loud warning
     is printed and the caller is expected to mark downstream results tainted.
     """
     expected = spec.source.get("files", {})
     if not expected:
         return []
-    scheme = spec.source.get("hash_scheme", HASH_SCHEME_RAW)
+    scheme = spec.source.get("hash_scheme")
+    if scheme != HASH_SCHEME:
+        raise ValueError(f"unsupported source hash scheme: {scheme!r}")
     current = implementation_source_hashes(spec, repo_root, scheme=scheme)
     differences = [
         path for path in sorted(set(expected) | set(current))

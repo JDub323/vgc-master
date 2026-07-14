@@ -1,8 +1,6 @@
 """Behavior cloning on human transitions (both perspectives of every game).
 
-Loss = weighted CE on the joint action (masked 39x39 softmax; legacy per-slot
-       checkpoints instead get the original two-slot CE, so resuming them
-       reproduces v1 training exactly)
+Loss = weighted CE on the joint action (masked 39x39 softmax)
      + value_loss_weight * MSE(value, final outcome)
      + aux_set_loss_weight * (CE item + CE ability + BCE moves) on oracle sets.
 
@@ -78,16 +76,10 @@ def compute_loss(model, batch, cfg=CFG):
     """Return ``(scalar_loss, detached_metric_tensors)`` for one BC batch."""
     tokens, acts, value_t, w, items_t, abils_t, moves_t = batch
     pol, value, (item_lg, abil_lg, move_lg) = model(tokens)
-    if pol.dim() == 2:                     # joint head: one masked 1521-way CE
-        label = acts[:, 0] * N_SLOT_ACTIONS + acts[:, 1]
-        logits = pol.masked_fill(~model.joint_mask, float("-inf"))
-        ce = F.cross_entropy(logits, label, reduction="none")
-        top1 = logits.argmax(-1) == label
-    else:                                  # legacy per-slot head (v1)
-        ce = (F.cross_entropy(pol[:, 0], acts[:, 0], reduction="none")
-              + F.cross_entropy(pol[:, 1], acts[:, 1], reduction="none"))
-        top1 = ((pol[:, 0].argmax(-1) == acts[:, 0])
-                & (pol[:, 1].argmax(-1) == acts[:, 1]))
+    label = acts[:, 0] * N_SLOT_ACTIONS + acts[:, 1]
+    logits = pol.masked_fill(~model.joint_mask, float("-inf"))
+    ce = F.cross_entropy(logits, label, reduction="none")
+    top1 = logits.argmax(-1) == label
     policy_loss = (ce * w).mean()
     value_loss = (F.mse_loss(value, value_t, reduction="none") * w).mean()
 

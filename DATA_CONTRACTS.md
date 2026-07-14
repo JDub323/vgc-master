@@ -175,7 +175,7 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `legal_joint_actions(request,map_fn)` | `Request`, mapping callable | Position-legal `list[JointAction]`. |
 | `_sid(name)` | Display name `str` | Lowercase alphanumeric Showdown id `str` (same rule as `data.sid`). |
 | `_pos_maps(request,name_to_idx)` | Raw request and set-name-to-preview-index mapping | `(party_pos->team_idx callable, dict[team_idx,party_pos])`. |
-| `joint_choice(request,joint,name_to_idx)` | Request, joint action, identity mapping | Showdown choice string; re-exported by `search.mcts` for legacy importers. |
+| `joint_choice(request,joint,name_to_idx)` | Request, joint action, identity mapping | Showdown choice string. |
 
 ### `config.py`
 
@@ -184,9 +184,8 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `Config(...)` | Typed dataclass fields for paths/data/model/belief/search/self-play | Mutable configuration dataclass. |
 | `_jsonable(v)` | Dataclass value, recursively | JSON-safe scalar/list/dict/string path. |
 | `config_snapshot(cfg)` | `Config` | Typed JSON mapping `dict[str,Any]`. |
-| `_parse_legacy_string(s)` | Legacy serialized `str` | Parsed bool/None/literal or original string. |
 | `_coerce_like(default,value)` | Default typed value and decoded value | Value coerced to the default's type. |
-| `config_from_snapshot(snapshot,base)` | Mapping (optionally under `config`) and optional base `Config` | Reconstructed `Config`, including conservative legacy defaults. |
+| `config_from_snapshot(snapshot,base)` | Typed mapping (optionally under `config`) and optional base `Config` | Reconstructed `Config`. |
 | `load_config_snapshot(path,base)` | JSON path and optional base | `Config`. |
 | `config_diff(a,b,fields)` | Two configs and optional field iterable | `list[(field, a_value, b_value)]`. |
 
@@ -317,13 +316,12 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 
 | function | input | output |
 |---|---|---|
-| `PolicyValueNet(...)` | Vocabulary/layout/aux sizes, config, `slot|joint` head, optional model config | Torch `nn.Module` with stored hyperparameters. |
-| `forward(tokens)` | Torch `long[B,T]` | `(policy_logits, value[B], (item_logits[B,6,I], ability_logits[B,6,A], move_logits[B,6,M]))`; policy is `[B,1521]` joint or legacy `[B,2,39]`. |
-| `joint_dist(pol)` | Either policy-logit shape | Torch normalized `[B,1521]`. |
+| `PolicyValueNet(...)` | Vocabulary/layout/aux sizes, config, joint head, optional model config | Torch `nn.Module` with stored hyperparameters. |
+| `forward(tokens)` | Torch `long[B,T]` | `(policy_logits[B,1521], value[B], (item_logits[B,6,I], ability_logits[B,6,A], move_logits[B,6,M]))`. |
+| `joint_dist(pol)` | Joint policy logits | Torch normalized `[B,1521]`. |
 | `predict_batch(tokens)` | NumPy/Torch integer `[B,T]` | `ModelPrediction` NumPy tuple. |
 | `save(path)` | Destination path | `None`; writes hp/state/config checkpoint. |
 | `load(path,cfg,device)` | Checkpoint path, base config, Torch device | Loaded/eval-capable `PolicyValueNet`. |
-| `from_slot(slot_model,cfg)` | Legacy slot-head model | Joint-head model initialized to the same distribution. |
 | `clean_state_dict(model)` | Eager or compiled module | Eager-keyed state mapping. |
 | `strip_compile_prefix(state)` | State mapping | Copy with `_orig_mod.` prefixes removed. |
 | `_model_cfg_from_checkpoint(hp,state,cfg)` | Saved metadata/state/base config | Recovered model-architecture mapping. |
@@ -335,6 +333,8 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `RandomPolicy.predict_batch(dmg_active)` | NumPy batch, first dimension `B` | Uniform factorized NumPy float `[B,2,39]`. |
 | `MaxDamagePolicy(eps)` | Smoothing probability | Stateless predictor. |
 | `MaxDamagePolicy.predict_batch(dmg_active)` | NumPy `uint8[B,2,4,2]` | Smoothed factorized NumPy float `[B,2,39]`. |
+| `DamageStatusSwitchCandidates(...)` | Tokenizer/config | Candidate-set evaluator baseline. |
+| `DamageStatusSwitchCandidates._slot_candidates(blocks,grid,slot)` | Decoded blocks, damage grid, slot index | Ranked slot candidates and scores. |
 
 ### `train.py`
 
@@ -384,7 +384,7 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 
 | function | input | output |
 |---|---|---|
-| `DeterminizedDUCTChooser(...)` | Same constructor inputs as legacy `search.mcts.Searcher` | Full versioned v1 chooser; external belief class pinned to v1. |
+| `DeterminizedDUCTChooser(...)` | Model/tokenizer/config and optional injected bricks | Full versioned v1 chooser; external belief class pinned to v1. |
 | `PolicyOnlyChooser(chooser)` | Full chooser | Wrapper sharing bridge/belief/resource ownership. |
 | `PolicyOnlyChooser.choose(...)` | Standard chooser inputs | Wrapped `(JointAction, ChoiceInfo)` using root priors only. |
 | `PolicyOnlyChooser.close()` | None | `None`; closes wrapped chooser. |
@@ -435,7 +435,7 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `validate(spec)` | Spec/mapping | Parsed `AgentSpec`; raises on unavailable or missing IDs. |
 | `build(spec,model,tokenizer,cfg,seed,debug,sidecar,apply_spec_config)` | Manifest plus runtime dependencies | Concrete `MoveChooser`. |
 | `_strip_docstrings(tree)` | Parsed `ast` tree | Same tree with docstring statements removed in place (`pass` inserted when a body would empty). |
-| `_normalized_source_hash(path,scheme)` | Source path and hash scheme (`raw-v1`/`ast-v1`) | SHA-256 hex `str` of raw bytes or the docstring-stripped AST dump. |
+| `_normalized_source_hash(path,scheme)` | Source path and `ast-v1` scheme | SHA-256 hex `str` of the docstring-stripped AST dump. |
 | `implementation_source_hashes(spec,repo_root,scheme)` | Spec, optional source root, hash scheme | `dict[relative_path, sha256_hex]`. |
 | `verify_implementation_sources(spec,repo_root,allow_drift)` | Spec/root and drift-override flag | Sorted drifted-path `list[str]` (empty when identity holds); raises on mismatch unless `allow_drift`, which warns instead. |
 | `build_agent(spec,**kwargs)` | Same as registry build | Concrete chooser. |
@@ -465,11 +465,11 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `Node.update(i,j,z)` | Selected indices and searching-side result | `None`; increments both zero-sum bandit tables. |
 | `_joint_priors(joint_dist,joints,k)` | Flat model distribution, legal actions, optional k | Compatibility delegation to v1 prior. |
 | `DetGame(searcher,tracker,opp_sample,my_id,my_request,my_brought,opp_brought,solve)` | Chooser orchestration inputs and one sampled team | Reconstructed determinization object/root node. |
-| `Searcher(model,tok,cfg,seed,debug,sidecar,position_encoder,policy_prior,leaf_evaluator,searcher)` | Inference/tokenizer/runtime and optional injected bricks | Legacy-compatible full chooser; owns sidecar/bridge only when not injected. |
-| `Searcher.close()` | None | `None`; closes owned processes. |
-| `Searcher.choose(...)` | Standard chooser inputs plus legacy `policy_only` flag | `(JointAction, ChoiceInfo)`. |
+| `DeterminizedDUCTChooser(model,tok,cfg,seed,debug,sidecar,position_encoder,policy_prior,leaf_evaluator,searcher)` | Inference/tokenizer/runtime and optional injected bricks | Full chooser; owns sidecar/bridge only when not injected. |
+| `DeterminizedDUCTChooser.close()` | None | `None`; closes owned processes. |
+| `DeterminizedDUCTChooser.choose(...)` | Standard chooser inputs plus `policy_only` flag | `(JointAction, ChoiceInfo)`. |
 | `_debug_print(dets,belief,wall,policy_only)` | Completed roots and timing | `None`; prints profiler/root/belief diagnostics. |
-| `_simulate`, `_leaf_value`, `_settle` | Compatibility arguments | Delegated `None`/`float` results from search brick. |
+| `_leaf_value`, `_settle` | Search arguments | Delegated `float`/`None` results from search brick. |
 | `_expand(det,battle,tracker,my_request)` | Determinization and current sim/tracker state | New `Node` with encoded/evaluated/pruned actions. |
 | `_describe(tracker,side,joint)` | Public tracker, side, joint action | Human-readable action string. |
 | `SearchDebug(enabled)` | Bool | Timer/counter object. |
@@ -492,15 +492,14 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `load_registry(cfg)` | Config | Decoded `{'results': list[BenchmarkResult]}` or empty default. |
 | `save_registry(reg,cfg)` | Registry mapping/config | `None`; writes JSON. |
 | `archive(name,ckpt,notes,cfg)` | Unique name, optional explicit checkpoint, notes, config | `None`; creates immutable full-agent directory or raises. |
-| `rename(old,new,cfg)` | Archive names/config | `None`; renames bundle and migrates result references. |
 | `list_bundles(cfg)` | Config | `None`; prints directories containing metadata. |
-| `Contestant(name,cfg,device,allow_source_drift)` | `'current'` or archive name, config, Torch device, drift override | Loaded model/tokenizer/spec/config/usage holder; `.source_drift` lists any tolerated hash drift. |
+| `Contestant(name,cfg,device,allow_source_drift)` | `'current'`, `'baseline'`, or archive name, config, Torch device, drift override | Loaded model/tokenizer/spec/config/usage holder; `.source_drift` lists any tolerated hash drift. |
 | `_verify_runtime(spec,current_cfg)` | Static manifest/current environment | `None`; raises on recorded mismatch. |
 | `_runtime_cfg(saved,current,bundle,strict)` | Saved/current configs, optional archive root | Config with frozen assets and machine-local paths. |
 | `_load_usage(search_cfg,current_cfg,strict)` | Configs/strict flag | Decoded usage mapping. |
 | `_with_runtime_overrides(saved,current,sims,depth)` | Configs and explicit run overrides | Replaced runtime `Config`. |
 | `_print_cfg_diffs(a,b,current)` | Two contestants/current config | `None`; prints meaningful differences. |
-| `_make_searcher(contestant,run_cfg)` | Loaded contestant and run config | Exact registered `MoveChooser` or legacy searcher. |
+| `_make_searcher(contestant,run_cfg)` | Loaded contestant and run config | Exact registered `MoveChooser`. |
 | `run_game(sc,bots,sets_by_side,cfg,temperature,rng,max_turns,feed)` | Shared sidecar, side->Bot, true sets, options, optional spectator feed | `(winner_side|None, turns:int)`. |
 | `series_pairings(team_names,repeat,quick,seed)` | Names/count/subsample options | Ordered `list[(team_a,team_b)]`. |
 | `run_series(...)` | Contestant names, budgets/workers/replay/record filters, `allow_source_drift` | `list[BenchmarkResult]`; optionally appends registry/replays; drifted runs carry `source_drift_a/b` file lists. |
@@ -508,7 +507,7 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `wilson(w,n,z)` | Score successes, count, z | `(lower,upper)` confidence bounds. |
 | `elo_diff(score)` | Score fraction | Elo difference `float` with endpoint clipping. |
 | `standings(cfg)` | Config | `None`; prints era-separated, architecture-grouped BT ratings, flagging `*drift` contestants. |
-| `main(cfg)` | Config and CLI args | `None`; dispatches archive/list/rename/play/standings. |
+| `main(cfg)` | Config and CLI args | `None`; dispatches archive/list/play/standings; play defaults B to `baseline`. |
 
 ### `selfplay.py`
 
@@ -530,7 +529,7 @@ generation attaches outcome and opponent-oracle labels while flushing them.
 | `sp_loss(model,batch,cfg)` | Joint model and self-play batch | `(loss tensor, detached metric tensor mapping)`. |
 | `train_iteration(model,cur_iter,device,cfg)` | Model/iteration/device/config | `None`; fine-tunes model in place and prints metrics. |
 | `gate(model_new,model_old,tok,cfg,n_games,workers)` | Two models and gate options | New-model score fraction `float`. |
-| `fork_model(src_ckpt,cfg,device)` | Source checkpoint/config/device | Loaded joint-head `PolicyValueNet`, converting legacy head if needed. |
+| `fork_model(src_ckpt,cfg,device)` | Source checkpoint/config/device | Loaded joint-head `PolicyValueNet`; rejects other heads. |
 | `main(cfg)` | Config and CLI flags | `None`; controls resumable generate/train/gate iterations. |
 
 ### `observe_game.py`

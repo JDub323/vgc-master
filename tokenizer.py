@@ -2,7 +2,7 @@
 
 Fixed layout (one position always means the same thing, so learned positional
 embeddings carry the structure; encode() asserts the layout every call).
-Layouts 2-3 (561 tokens; layout 3 is current):
+Layout 3 (561 tokens):
 
   [0]        CLS
   [1..4]     turn bucket, weather, terrain, trick room flag
@@ -15,10 +15,9 @@ Layouts 2-3 (561 tokens; layout 3 is current):
              counter is public: everyone sees Protect succeed)
   [231..272] opp 6 mons x 7 belief tokens: modal item, P(that item) bucket,
              speed-range low, speed-range high, bulk, inferred latent, and
-             P(that latent). Layout 3 uses modal nature (the objective spread
-             prior fixes concrete SP and inference discriminates nature);
-             layout 2 used the modal hand-built spread archetype. Exact SP
-             values are never exposed as tokens.
+             P(that latent). The modal latent is nature: the objective spread
+             prior fixes concrete SP and inference discriminates nature.
+             Exact SP values are never exposed as tokens.
   [273..560] damage matrix: my mon i x move j x opp mon k -> (min, max) roll
              bucket pair. Two bounds fully describe the roll distribution:
              Showdown damage is a uniform pick from 16 evenly spaced
@@ -30,10 +29,6 @@ Layouts 2-3 (561 tokens; layout 3 is current):
   PROT_1, <=1/9 at PROT_2 (verified against the pinned sim: the stall
   counter triples per consecutive use; Wide/Quick Guard never fail from it
   but DO increment it).
-
-Layout 1 (537 tokens, archived pre-phase-3 models) is the same without Protect
-and the two inferred-latent belief tokens; vocab.json records the layout and
-benchmark bundles reconstruct it exactly.
 
 Designed to be swapped out wholesale: everything downstream only calls
 encode() / vocab_size() / the aux-label index helpers.
@@ -70,7 +65,8 @@ class PositionTokenizer:
     """Layout-versioned encoder from CTS dictionaries to fixed token arrays."""
 
     def __init__(self, vocab: dict, lists: dict, cfg=CFG, layout=LAYOUT_VERSION):
-        assert layout in (1, 2, 3), layout
+        if layout != LAYOUT_VERSION:
+            raise ValueError(f"unsupported tokenizer layout {layout}")
         self.vocab = vocab
         self.cfg = cfg
         self.layout = layout
@@ -80,8 +76,8 @@ class PositionTokenizer:
         self._move_map = {m: i + 1 for i, m in enumerate(self.move_list)}
         self._item_map = {m: i + 1 for i, m in enumerate(self.item_list)}
         self._abil_map = {m: i + 1 for i, m in enumerate(self.ability_list)}
-        self.mon_block = MON_BLOCK + (1 if layout >= 2 else 0)     # + protect
-        self.belief_block = BELIEF_BLOCK + (2 if layout >= 2 else 0)  # + inferred latent
+        self.mon_block = MON_BLOCK + 1
+        self.belief_block = BELIEF_BLOCK + 2
         self.my_base = 15
         self.opp_base = self.my_base + N_MONS * self.mon_block
         self.belief_base = self.opp_base + N_MONS * self.mon_block
@@ -124,10 +120,9 @@ class PositionTokenizer:
 
     @classmethod
     def load(cls, cfg=CFG, path=None):
-        """path: explicit vocab.json (benchmark bundles); default = current
-        artifacts. Files that predate the layout field are layout 1."""
+        """Load a current-layout vocabulary from an explicit or default path."""
         d = json.loads(Path(path or cfg.artifacts_dir / "vocab.json").read_text())
-        return cls(d["vocab"], d["lists"], cfg, layout=d.get("layout", 1))
+        return cls(d["vocab"], d["lists"], cfg, layout=d["layout"])
 
     def vocab_size(self):
         """Return the number of token ids in the loaded vocabulary."""

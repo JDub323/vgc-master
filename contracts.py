@@ -3,7 +3,7 @@
 The project deliberately passes plain dictionaries between the parser,
 beliefs, tokenizer, simulator, agents, and archive loader.  These ``TypedDict``
 definitions document those wire shapes without changing their runtime
-representation.  Optional keys reflect legacy archives, partial Showdown
+representation. Optional keys reflect partial Showdown
 requests, and belief-sampled sets before :func:`env.full_set` normalization.
 
 For exhaustive per-function input/output contracts, see ``DATA_CONTRACTS.md``.

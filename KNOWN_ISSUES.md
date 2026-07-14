@@ -86,17 +86,14 @@ Consider recording the scrape date in the JSON and warning when old.
   source identity was raw SHA-256 file bytes and any mismatch was a hard
   failure. Now: (1) new manifests record `hash_scheme: "ast-v1"` — the hash of
   the docstring-stripped AST — so comments/docstrings/formatting no longer
-  invalidate archives while logic edits still fail closed; legacy manifests
-  (no scheme) keep verifying against raw bytes. (2)
+  invalidate archives while logic edits still fail closed. (2)
   `benchmark.py play ... --allow-source-drift` explicitly tolerates a real
   mismatch: it warns loudly, runs the archive through current code, stamps
   `source_drift_a/b` (the drifted file list) onto every result row, and
   `report`/`standings` flag those games/contestants (`*drift`). Bit-faithful
-  replay after a genuine behavior change remains covered by retained
-  v1 modules (with content-addressed source vendoring as a possible later
-  upgrade). Note: archives created before this change recorded raw-byte
-  hashes against pre-refactor sources, so they verify only on the commits
-  they were built from — re-archive current contestants after this branch.
+  replay after a genuine behavior change remains covered by retained v1
+  modules (with content-addressed source vendoring as a possible later
+  upgrade).
 
 - **Circular layering between the search brick and the chooser** —
   `agents/search/v1.py` deferred-imported `joint_choice` from
