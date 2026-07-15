@@ -33,7 +33,10 @@ def load_test_predictions(checkpoint, cfg=CFG):
     if not files:
         raise FileNotFoundError(f"no test shards under {cfg.prepped_dir}")
     dmg_active = np.concatenate([np.load(f)["dmg_active"] for f in files])
-    model = PolicyValueNet.load(checkpoint, cfg, device)
+    # exp/entity-hybrid: checkpoints record their architecture; entity
+    # checkpoints load as EntityHybridNet, everything else as PolicyValueNet
+    from models.entity_hybrid import load_any_policy_model
+    model = load_any_policy_model(checkpoint, cfg, device)
     dists, values = [], []
     for i in range(0, len(ds), cfg.batch_size):
         dist, value, _ = model.predict_batch(ds.tokens[i:i + cfg.batch_size])

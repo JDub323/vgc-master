@@ -658,6 +658,9 @@ their bundles compose here.
 | [benchmark.py](benchmark.py) | Frozen baseline plus immutable full-agent archives, model-vs-model series, and architecture-grouped Elo/BT standings. |
 | [models/baselines.py](models/baselines.py) | Batched random and max-damage predictor baselines used by offline evaluation; gameplay chooser versions live under `agents/`. |
 | [train.py](train.py) | Behavior cloning loop with AMP/cosine/resume. Exists to fit the network; nothing else trains anything. |
+| [models/entity_hybrid.py](models/entity_hybrid.py) | exp/entity-hybrid: shared per-Pokemon encoders + 13-entity transformer + residual MLP trunk with the same heads/predict_batch contract as PolicyValueNet; drops the damage block. |
+| [train_entity.py](train_entity.py) | exp/entity-hybrid: BC loop for EntityHybridNet, reusing train.py's loaders/loss/schedule; writes entity_ckpt_*.pt; `--smoke` self-test, `--augment` permutation augmentation. |
+| [entity_augment.py](entity_augment.py) | exp/entity-hybrid: per-row team-order and move-slot permutation with switch/move action labels and aux oracle labels remapped; teaches permutation-equivariance. |
 | [evaluate.py](evaluate.py) | Predictor metrics, headline pruned-set recall@k. Exists to certify that top-k pruning is safe before search trusts it. |
 | [evaluation_common.py](evaluation_common.py) | Shared held-out loading and policy metric calculations for evaluation scripts. |
 | [probe_policy.py](probe_policy.py) | Focused policy sanity and behavior probes used before expensive search benchmarks. |

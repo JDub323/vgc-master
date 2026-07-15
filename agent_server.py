@@ -83,11 +83,14 @@ def build_chooser(kind, ckpt, cfg, seed=0):
 
         from agents.determinized_duct.v1 import DeterminizedDUCTChooser
         from agents.policy_only.v1 import PolicyOnlyChooser
-        from models.policy_value import PolicyValueNet
+        # exp/entity-hybrid: dispatch on the checkpoint's recorded
+        # architecture, so `--ckpt entity_ckpt_best.pt` serves the entity
+        # model through the identical DUCT / policy-only stack
+        from models.entity_hybrid import load_any_policy_model
         from tokenizer import PositionTokenizer
         device = "cuda" if torch.cuda.is_available() else "cpu"
         chooser = DeterminizedDUCTChooser(
-            PolicyValueNet.load(ckpt, cfg, device),
+            load_any_policy_model(ckpt, cfg, device),
             PositionTokenizer.load(cfg), cfg, seed=seed)
         return chooser if kind == "search" else PolicyOnlyChooser(chooser)
     raise SystemExit(

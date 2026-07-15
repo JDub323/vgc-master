@@ -294,6 +294,27 @@ HELP = {
         Options:
           -h, --help         Show this help message and exit.
     """,
+    "train_entity.py": """
+        Behavior-clone the entity-hybrid model (exp/entity-hybrid): shared
+        per-Pokemon encoders, a 13-entity transformer, and a residual MLP
+        trunk over the same layout-3 shards, losses, and schedule as
+        train.py. Damage-block tokens are dropped by the architecture.
+        Checkpoints: entity_ckpt_last.pt / entity_ckpt_best.pt (the
+        baseline's ckpt_*.pt are never touched).
+
+        Usage: python train_entity.py [EPOCHS] [options]
+
+        Arguments:
+          EPOCHS             Total epoch count (default: Config.epochs).
+
+        Options:
+          --augment          Per-row team-order + move-slot permutation with
+                             action/aux labels remapped (entity_augment.py).
+                             Run A trains without it; run B with it.
+          --smoke            Build/forward/backward/save/load self-test with
+                             random tokens (no shards needed), then exit.
+          -h, --help         Show this help message and exit.
+    """,
 }
 
 
