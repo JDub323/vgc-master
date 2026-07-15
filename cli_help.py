@@ -294,6 +294,45 @@ HELP = {
         Options:
           -h, --help         Show this help message and exit.
     """,
+    "seq2seq_prep.py": """
+        Build the per-row legality/label sidecars the seq2seq pointer model
+        trains on (exp/seq2seq-pointer): per-slot legal masks reconstructed
+        from tokens (PositionLegality's permissive superset) and the human
+        labels projected onto their move's real target codes
+        (KNOWN_ISSUES.md #3). One-time pass per split; writes bit-packed
+        artifacts/prepped/seq2seq_<split>.npz aligned with the shard rows.
+        The existing shards are never modified.
+
+        Usage: python seq2seq_prep.py [SPLIT ...]
+
+        Arguments:
+          SPLIT              Splits to build (default: train val test).
+
+        Options:
+          -h, --help         Show this help message and exit.
+    """,
+    "train_seq2seq.py": """
+        Behavior-clone the seq2seq pointer model (exp/seq2seq-pointer): the
+        entity-hybrid encoder feeding one decoder layer over the 78 legal-
+        action candidates, with a legal-masked slot-A pointer head and a
+        slot-B|A pairwise head. Same shards, splits, weights, optimizer, and
+        schedule as train.py; the policy loss is set-CE over the projected
+        label set. Requires the seq2seq_prep.py sidecars. Checkpoints:
+        seq2seq_ckpt_last.pt / seq2seq_ckpt_best.pt (the baseline's
+        ckpt_*.pt are never touched).
+
+        Usage: python train_seq2seq.py [EPOCHS] [options]
+
+        Arguments:
+          EPOCHS             Total epoch count (default: Config.epochs).
+
+        Options:
+          --smoke            Build/forward/backward/save/load/predict_batch
+                             self-test on synthetic masks (no shards
+                             needed), including the B=2 PositionLegality
+                             overhead timing, then exit.
+          -h, --help         Show this help message and exit.
+    """,
 }
 
 

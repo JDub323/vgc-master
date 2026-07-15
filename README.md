@@ -658,6 +658,10 @@ their bundles compose here.
 | [benchmark.py](benchmark.py) | Frozen baseline plus immutable full-agent archives, model-vs-model series, and architecture-grouped Elo/BT standings. |
 | [models/baselines.py](models/baselines.py) | Batched random and max-damage predictor baselines used by offline evaluation; gameplay chooser versions live under `agents/`. |
 | [train.py](train.py) | Behavior cloning loop with AMP/cosine/resume. Exists to fit the network; nothing else trains anything. |
+| [models/entity_hybrid.py](models/entity_hybrid.py) | exp/entity-hybrid encoder reused by this branch: shared per-Pokemon encoders + 13-entity transformer with the same heads/predict_batch contract as PolicyValueNet; drops the damage block. |
+| [models/seq2seq.py](models/seq2seq.py) | exp/seq2seq-pointer: legal actions become decoder candidate tokens over the entity encoder; slot-A pointer + slot-B\|A pairwise heads, chain-rule expanded to the flat [1521] joint grid inside predict_batch. |
+| [seq2seq_prep.py](seq2seq_prep.py) | exp/seq2seq-pointer: one-time per-split sidecar of bit-packed per-slot legal masks and target-projected label sets (KNOWN_ISSUES.md #3), so training never runs per-row Python. |
+| [train_seq2seq.py](train_seq2seq.py) | exp/seq2seq-pointer: BC loop for Seq2SeqPointerNet reusing train.py's loaders/weights/schedule; set-CE policy loss over projected label sets; writes seq2seq_ckpt_*.pt; `--smoke` self-test. |
 | [evaluate.py](evaluate.py) | Predictor metrics, headline pruned-set recall@k. Exists to certify that top-k pruning is safe before search trusts it. |
 | [evaluation_common.py](evaluation_common.py) | Shared held-out loading and policy metric calculations for evaluation scripts. |
 | [probe_policy.py](probe_policy.py) | Focused policy sanity and behavior probes used before expensive search benchmarks. |
