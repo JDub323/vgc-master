@@ -213,6 +213,24 @@ HELP = {
           --cprofile PATH    Also dump cProfile stats for snakeviz/speedscope.
           -h, --help         Show this help message and exit.
     """,
+    "replays.py": """
+        Search saved game replays from the terminal and open them in the
+        real Showdown replay player through a local HTTP server (the port
+        triggers VS Code's forward/open popup). '/' on the server is a
+        browsable index with the same substring search.
+
+        Usage: python replays.py [options]
+
+        REPL: type text to filter (run / team / agent / winner), a number
+        to open, 'latest' for the newest match, 'r' to rescan, 'q' to quit.
+
+        Options:
+          --port N           Server port (default: 8030).
+          --dir PATH         Replay root (default: artifacts/replays).
+          --serve            Server only, no REPL (Ctrl-C stops).
+          --latest           Open the newest replay immediately.
+          -h, --help         Show this help message and exit.
+    """,
     "observe_game.py": """
         Run search-vs-search simulator games and print decisions, beliefs, and
         mixed strategies turn by turn.
