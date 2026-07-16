@@ -188,14 +188,15 @@ replaying identically.
 ```bash
 python env.py --selftest     # proves mid-battle state reconstruction — run first
 python beliefs.py --audit    # particle-filter breakdown rates on held-out games
-python scenarios.py          # endgame assertions incl. the mixed-strategy test
+python scenarios.py          # endgame gates (mixed-strategy test) + midgame diagnostics
 python scenarios.py --mine   # extract real-replay endgame candidates
 python observe_game.py --step        # watch a search-vs-search game, turn by turn
 python env.py --live [ckpt]          # play on a local Showdown server via poke-env
 ```
 
-`scenarios.py` runs with or without a trained checkpoint (endgames are solved
-to terminal); everything else in this phase needs the phase-1 artifacts.
+`scenarios.py`'s endgame gates run with or without a trained checkpoint
+(endgames are solved to terminal); its earlygame/midgame diagnostic positions
+and everything else in this phase need the phase-1 artifacts.
 The current pipeline uses tokenizer layout 3 throughout. Any future layout
 change **invalidates prepped shards and checkpoints: re-run `data.py prep` and
 `train.py` before `evaluate.py` / `observe_game.py`**.
@@ -251,7 +252,7 @@ python benchmark.py standings              # Bradley-Terry ratings, segregated b
 
 # diagnostics for the two model-quality items
 python evaluate.py --switches              # is switching underweighted in the prior?
-python scenarios.py                        # incl. two new diagnostic positions
+python scenarios.py                        # endgame gates + midgame diagnostics
 
 # prior ablation/capacity conclusions are preserved in EXPERIMENTS.md
 ```
@@ -515,8 +516,21 @@ Cleave punishes the Bullet Punch line — matching-pennies structure, so a
 correct simultaneous-move search **must** output a mixed strategy
 (assertion: both Metagross options ≥ 20%). A pure answer here is
 the signature failure of sequential-move search. Two more authored endgames
-assert won positions are recognized (value ≥ threshold, top action attacks).
-The runner prints the actual damage matrix via the calc bridge so you can
+assert won positions are recognized (value ≥ threshold, top action attacks),
+and a Trick Room gate asserts the priority-chip line (Sucker Punch shrinking
+a full-HP Eruption below Garchomp's bar) is found exactly in solve mode.
+
+Scenarios are **not endgame-only**: a set of earlygame/midgame diagnostic
+positions (full or near-full teams, back mons, megas, weather) probes model
+understanding rather than search correctness — switching an endangered mon
+out, weather-war control (snow Tailwind race, a predicted Pelipper switch-in
+that flips sun to rain and third-cuts Heat Wave), and Contrary boost lines
+(self-Tickle Mega Staraptor, including the Rage-Powder-vs-Follow-Me
+redirection asymmetry: powder moves cannot redirect a Grass-type's Tickle,
+Follow Me can). These need a checkpoint (value-head leaves), print NOTEs
+instead of gating, and are meant to be tracked across checkpoints.
+The runner prints the actual damage matrix via the calc bridge — with the
+scenario's weather, mega formes, and fainted-ally state applied — so you can
 verify each position is what the assertion assumes. `--mine` extracts real
 2v2-or-smaller endgames from held-out replays into `artifacts/endgames.json`;
 `--replay N` runs the search on one so vetted positions can be promoted into
@@ -678,7 +692,7 @@ their bundles compose here.
 | [search/node.py](search/node.py) | Decoupled-UCT node (two PUCT tables). Exists because simultaneous turns demand per-player statistics — the whole reason vanilla UCT is banned here. |
 | [search/mcts.py](search/mcts.py) | Determinized DUCT reconstruction/orchestration; delegates encoding, priors, evaluation, and mechanics to versioned bricks. |
 | [search/debug.py](search/debug.py) | Phase profiler, cProfile hook, root particle monitor, per-det root tables. Exists so "why is it slow / why did it do that" has a flag instead of an archaeology session. |
-| [scenarios.py](scenarios.py) | Endgame assertions (mixed-strategy gate) + real-replay endgame mining. Exists so search regressions fail loudly instead of costing Elo silently. |
+| [scenarios.py](scenarios.py) | Endgame gates (mixed-strategy assertion) + earlygame/midgame model diagnostics (switch-outs, weather wars, Contrary boost lines) + real-replay endgame mining. Exists so search regressions fail loudly instead of costing Elo silently. |
 | [observe_game.py](observe_game.py) | Step-through self-play viewer of beliefs/predictions/strategy/value. Exists because a bot you can't watch thinking can't be debugged. |
 | [teams.py](teams.py) | 10 replica Reg M-B teams (real tournament archetypes) + export parser + sim-validator + dataset team miner. Exists so human games start from realistic, legal, varied matchups. |
 | [play.py](play.py) | Human-vs-bot orchestration: local server spawn, chooser menu, live "bot thoughts" dashboard. Exists so a human can actually fight — and read — the bot without any custom battle GUI. |

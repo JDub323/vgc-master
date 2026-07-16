@@ -1,4 +1,5 @@
-"""Scripted endgame scenarios with assertions about search behavior.
+"""Scripted scenarios with assertions about search behavior — endgame gates
+plus earlygame/midgame diagnostics.
 
 The headline test is the Metagross/Kingambit 1v1: Bullet Punch outprioritizes
 and blanks Sucker Punch (the target already moved), Hammer Arm OHKOs at 4x but
@@ -8,10 +9,24 @@ return a mixed strategy — a pure answer here means the search is broken
 (that is exactly the failure mode of alternating-move UCT). The assertion:
 both Metagross options carry >= 20% probability.
 
-Scenarios run in solve-to-terminal mode (small endgames), so they work with
-or without a trained checkpoint — priors just speed convergence. Opponent
-sets are given to the search as a collapsed belief: these are known-sets
-equilibrium checks, not hidden-information tests.
+Two scenario classes:
+
+  endgame gates    <= solve_endgame_at mons per side, run in solve-to-terminal
+                   mode, so they work with or without a trained checkpoint —
+                   priors just speed convergence. FAILs gate the suite.
+  early/midgame    full or near-full teams (back mons, weather wars, megas,
+  diagnostics      trick room). These need a checkpoint (value-head leaves)
+                   and probe model understanding rather than search
+                   correctness: switching an endangered mon out, weather
+                   control, predicted opponent switch-ins, Contrary boost
+                   lines. They print NOTEs, never gate — track them across
+                   checkpoints.
+
+Opponent sets are given to the search as a collapsed belief: these are
+known-sets checks, not hidden-information tests. Every position prints its
+real damage matrix (through @smogon/calc, with the scenario's weather and
+fainted-ally state) so a reviewer can verify each doc claim is what the
+engine actually computes.
 
 CLI:
   python scenarios.py [--uniform]   # run all scenario assertions
@@ -201,6 +216,283 @@ SCENARIOS = [
             _joint_mass(info, 0, ("dragonclaw", "rockslide"), 1,
                         ("sludgebomb", "protect", "sw "))),
     },
+    {
+        # ENDGAME GATE (solve mode): priority chip changes an HP-scaled nuke.
+        "name": "torkoal-room-eruption",
+        "doc": "Trick Room, sun. My Kingambit (85%) + Garchomp (42%) vs full "
+               "Torkoal. Full-HP sun Eruption KOs Garchomp (min 44% vs 42) "
+               "and always KOs Kingambit; Eruption's power scales with "
+               "Torkoal's HP, so a Sucker Punch chip (~35-41%) drops it below "
+               "Garchomp's bar (max ~34%). Under Trick Room Torkoal moves "
+               "before Garchomp, so the winning line is one turn: Sucker "
+               "Punch chips first (priority ignores TR), the weakened "
+               "Eruption still fells Kingambit but not Garchomp, and Life "
+               "Orb Earthquake (min 72%) finishes the chipped Torkoal from "
+               "at most 65.5%. Kingambit is dead in every line, so spending "
+               "it on the chip is right (both its attacks are all-attack "
+               "sets, so Sucker Punch always connects). Assert: P(Sucker "
+               "Punch) >= 50%, the Sucker Punch + Earthquake joint >= 35%, "
+               "value >= +0.5.",
+        "stage": "endgame",
+        "weather": "sunnyday",
+        "trickroom": True,
+        "p1": [mon("Kingambit", ["suckerpunch", "kowtowcleave", "ironhead",
+                                 "protect"],
+                   item="blackglasses", ability="defiant", nature="adamant",
+                   evs=[32, 32, 0, 0, 2, 0]),
+               mon("Garchomp", ["earthquake", "dragonclaw", "protect"],
+                   item="lifeorb", ability="roughskin", nature="jolly",
+                   evs=ATK)],
+        "p2": [mon("Torkoal", ["eruption", "heatwave"],
+                   item="charcoal", ability="drought", nature="quiet",
+                   evs=[32, 0, 0, 32, 2, 0], gender="F"), filler()],
+        "hp": {("p1", 0): 0.85, ("p1", 1): 0.42},
+        "fainted": [("p2", 1)],
+        "check": lambda info: (
+            [f"P(sucker punch)={_slot_mass(info, 0, 'suckerpunch'):.0%} < 50% "
+             "— the priority chip that saves Garchomp is being missed"]
+            if _slot_mass(info, 0, "suckerpunch") < 0.50 else []) + (
+            [f"sucker+earthquake joint={_joint_mass(info, 0, ('suckerpunch',), 1, ('earthquake',)):.0%} < 35%"]
+            if _joint_mass(info, 0, ("suckerpunch",), 1,
+                           ("earthquake",)) < 0.35 else []) + (
+            [f"value {info['value']:+.2f} < +0.5 in a won position"]
+            if info["value"] < 0.5 else []),
+    },
+    {
+        # DIAGNOSTIC: weather war + priority Tailwind race with real
+        # counterplay on both sides ("just a complex position all-around").
+        "name": "whimsi-chomp-snow",
+        "doc": "Midgame weather war (needs a checkpoint). My Whimsicott + "
+               "Garchomp vs Ninetales-Alola (45%) + Kingambit (65%) in snow, "
+               "Pelipper in their back. Snow Blizzard KOs both my mons "
+               "(96-114% / 125-151%) and Ninetales (178 Spe) outruns "
+               "Garchomp (169) — but Prankster Tailwind flips the race "
+               "mid-turn: doubled Garchomp Earthquakes first and its Life "
+               "Orb EQ kills BOTH (min 47% vs 45, min 69% vs 65). Their "
+               "counterplay: Iron Head OHKOs Whimsicott before it matters "
+               "(Tailwind already resolved, so maybe that trade is fine), "
+               "Ninetales can Protect the EQ turn, Sucker Punch chips "
+               "Garchomp (45-54%), and even a won exchange hands Pelipper a "
+               "Drizzle re-entry that flips the weather war again. Encore "
+               "(Whimsicott) and Protect (Garchomp) give p1 the same stall "
+               "tools. Diagnostic: the Tailwind + Earthquake race should "
+               "carry real mass; ~zero means the model is not seeing the "
+               "mid-turn speed flip.",
+        "stage": "midgame",
+        "needs_model": True,
+        "diagnostic": True,
+        "weather": "snowscape",
+        "turn": 3,
+        "p1": [mon("Whimsicott", ["moonblast", "tailwind", "encore",
+                                  "protect"],
+                   item="mentalherb", ability="prankster", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F"),
+               mon("Garchomp", ["earthquake", "dragonclaw", "protect"],
+                   item="lifeorb", ability="roughskin", nature="jolly",
+                   evs=ATK)],
+        "p2": [mon("Ninetales-Alola", ["blizzard", "moonblast", "auroraveil",
+                                       "protect"],
+                   item="lightclay", ability="snowwarning", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F"),
+               mon("Kingambit", ["suckerpunch", "kowtowcleave", "ironhead",
+                                 "protect"],
+                   item="blackglasses", ability="defiant", nature="adamant",
+                   evs=[32, 32, 0, 0, 2, 0]),
+               mon("Pelipper", ["hurricane", "weatherball", "tailwind",
+                                "protect"],
+                   item="focussash", ability="drizzle", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F")],
+        "hp": {("p2", 0): 0.45, ("p2", 1): 0.65},
+        "fainted": [],
+        "check": lambda info: (lambda race: [
+            f"tailwind+earthquake race carries only {race:.0%} — the "
+            "mid-turn Tailwind speed flip is not being credited"
+        ] if race < 0.10 else [])(
+            _joint_mass(info, 0, ("tailwind",), 1, ("earthquake",))),
+    },
+    {
+        # DIAGNOSTIC: opponent modeling — a threatened side's best line is a
+        # weather-flipping switch, and the model should PREDICT it.
+        "name": "zardy-sun-peli-switch",
+        "doc": "Midgame opponent switch prediction (needs a checkpoint). My "
+               "Mega Charizard Y + Garchomp vs Sinistcha + Kingambit in sun, "
+               "Pelipper in their back. Sun Heat Wave OHKOs both actives "
+               "(129-153% / 114-136%), but a Pelipper switch-in flips sun to "
+               "rain on entry and eats Heat Wave at 13-16% instead of the "
+               "41-48% it would take in sun — a third of the damage, and it "
+               "shields whichever mon it replaces. Switching out the "
+               "endangered mon is the opponent's best line, so the model's "
+               "opponent prior should put real mass on 'sw pelipper'. "
+               "Diagnostic: predicted P(pelipper switches in) >= 10%.",
+        "stage": "midgame",
+        "needs_model": True,
+        "diagnostic": True,
+        "weather": "sunnyday",
+        "turn": 5,
+        "mega": [("p1", 0)],
+        "p1": [mon("Charizard", ["heatwave", "solarbeam", "weatherball",
+                                 "protect"],
+                   item="charizarditey", ability="solarpower", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32]),
+               mon("Garchomp", ["earthquake", "dragonclaw", "protect"],
+                   item="lifeorb", ability="roughskin", nature="jolly",
+                   evs=ATK)],
+        "p2": [mon("Sinistcha", ["matchagotcha", "ragepowder", "lifedew",
+                                 "protect"],
+                   item="kasibberry", ability="hospitality", nature="calm",
+                   evs=[32, 0, 32, 2, 0, 0]),
+               mon("Kingambit", ["kowtowcleave", "suckerpunch", "ironhead",
+                                 "protect"],
+                   item="blackglasses", ability="defiant", nature="adamant",
+                   evs=[32, 32, 0, 0, 2, 0]),
+               mon("Pelipper", ["hurricane", "weatherball", "tailwind",
+                                "protect"],
+                   item="focussash", ability="drizzle", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F")],
+        "hp": {},
+        "fainted": [],
+        "check": lambda info: (lambda p_sw: [
+            f"predicted P(sw pelipper)={p_sw:.0%} < 10% — the model does not "
+            "expect the weather-flipping protective switch"
+        ] if p_sw < 0.10 else [])(_opp_mass(info, "sw pelipper")),
+    },
+    {
+        # DIAGNOSTIC: Contrary boost line, unpunished. Mega Staraptor's
+        # ability is Contrary, so an ally Tickle is +1 Atk/+1 Def and an
+        # ally Charm is +2 Atk.
+        "name": "self-tickle-free",
+        "doc": "Boost-line discovery (needs a checkpoint). My Whimsicott + "
+               "Mega Staraptor (Contrary) vs slow, low-pressure Snorlax + "
+               "Milotic. Tickle on my own Staraptor is +1 Atk / +1 Def and "
+               "Charm is +2 Atk (Contrary inverts the drops); nothing on "
+               "the field meaningfully threatens Staraptor, so stacking "
+               "boosts before Brave Bird / Close Combat (64-76% unboosted "
+               "vs Milotic) is a legitimate line. Diagnostic: the ally-"
+               "targeted Tickle/Charm should carry >= 10% mass.",
+        "stage": "midgame",
+        "needs_model": True,
+        "diagnostic": True,
+        "turn": 4,
+        "mega": [("p1", 1)],
+        "p1": [mon("Whimsicott", ["tickle", "charm", "moonblast", "encore"],
+                   item="focussash", ability="prankster", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F"),
+               mon("Staraptor", ["bravebird", "closecombat", "doubleedge",
+                                 "protect"],
+                   item="staraptite", ability="intimidate", nature="jolly",
+                   evs=ATK)],
+        "p2": [mon("Snorlax", ["bodyslam", "highhorsepower", "yawn",
+                               "protect"],
+                   item="sitrusberry", ability="thickfat", nature="brave",
+                   evs=[32, 32, 0, 0, 0, 0]),
+               mon("Milotic", ["muddywater", "icebeam", "recover", "protect"],
+                   item="leftovers", ability="competitive", nature="calm",
+                   evs=[32, 0, 2, 0, 32, 0], gender="F")],
+        "hp": {},
+        "fainted": [],
+        "check": lambda info: (lambda boost: [
+            f"self-Tickle/Charm carries only {boost:.0%} — the Contrary "
+            "boost line is invisible to the model"
+        ] if boost < 0.10 else [])(
+            _mass(info, "tickle>ally") + _mass(info, "charm>ally")),
+    },
+    {
+        # DIAGNOSTIC: the same boost line under a real threat. NOTE the
+        # actual redirection mechanics, verified against the sim: Rage
+        # Powder is a powder move, and Whimsicott is Grass-type, so
+        # Sinistcha CANNOT redirect the ally-targeted Tickle (powder
+        # immunity). The danger here is not the redirect — it is Zen
+        # Headbutt (120-142%) deleting Mega Staraptor before any boost
+        # pays off.
+        "name": "self-tickle-threatened",
+        "doc": "Boost line vs pressure (needs a checkpoint). Same Whimsicott "
+               "+ Mega Staraptor (Contrary), now into Rage Powder Sinistcha "
+               "+ Zen Headbutt Mega Metagross, Incineroar in my back. Rage "
+               "Powder does NOT redirect the self-Tickle — Whimsicott is "
+               "Grass-type and Rage Powder is a powder move — but greeding "
+               "boosts is still wrong when Zen Headbutt OHKOs Staraptor "
+               "(120-142%): the payoff dies with the bird. Protecting "
+               "Staraptor or switching it out (Incineroar) has to carry "
+               "mass. Diagnostic: defensive Staraptor lines >= 15%.",
+        "stage": "midgame",
+        "needs_model": True,
+        "diagnostic": True,
+        "turn": 4,
+        "mega": [("p1", 1), ("p2", 1)],
+        "p1": [mon("Whimsicott", ["tickle", "charm", "moonblast", "encore"],
+                   item="focussash", ability="prankster", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F"),
+               mon("Staraptor", ["bravebird", "closecombat", "doubleedge",
+                                 "protect"],
+                   item="staraptite", ability="intimidate", nature="jolly",
+                   evs=ATK),
+               mon("Incineroar", ["fakeout", "throatchop", "flareblitz",
+                                  "partingshot"],
+                   item="sitrusberry", ability="intimidate", nature="careful",
+                   evs=[32, 2, 0, 0, 32, 0])],
+        "p2": [mon("Sinistcha", ["matchagotcha", "ragepowder", "lifedew",
+                                 "protect"],
+                   item="kasibberry", ability="hospitality", nature="calm",
+                   evs=[32, 0, 32, 2, 0, 0]),
+               mon("Metagross", ["zenheadbutt", "bulletpunch", "ironhead",
+                                 "protect"],
+                   item="metagrossite", ability="clearbody", nature="jolly",
+                   evs=ATK)],
+        "hp": {},
+        "fainted": [],
+        "check": lambda info: (lambda defensive: [
+            f"defensive Staraptor lines carry only {defensive:.0%} "
+            "(protect + switch out) under a clean OHKO threat"
+        ] if defensive < 0.15 else [])(
+            _slot_mass(info, 1, "protect") + _slot_mass(info, 1, "sw ")),
+    },
+    {
+        # DIAGNOSTIC: the redirect that DOES steal the boost. Follow Me has
+        # no powder flag, so unlike Rage Powder it redirects Grass-type
+        # Whimsicott's ally-targeted Tickle onto Clefairy (the Pollen Puff
+        # interaction) — the drop lands on a non-Contrary mon and the turn
+        # is wasted.
+        "name": "self-tickle-follow-me",
+        "doc": "Boost line vs redirection (needs a checkpoint). Whimsicott + "
+               "Mega Staraptor into Follow Me Clefairy + Mega Metagross. "
+               "Follow Me (unlike Rage Powder) redirects the ally-targeted "
+               "Tickle onto Clefairy — no Contrary there, so the self-boost "
+               "line is a wasted turn whenever Clefairy commits to Follow "
+               "Me, on top of the standing Zen Headbutt threat. Diagnostic: "
+               "self-Tickle/Charm should NOT dominate here (< 25%); compare "
+               "with self-tickle-free.",
+        "stage": "midgame",
+        "needs_model": True,
+        "diagnostic": True,
+        "turn": 4,
+        "mega": [("p1", 1), ("p2", 1)],
+        "p1": [mon("Whimsicott", ["tickle", "charm", "moonblast", "encore"],
+                   item="focussash", ability="prankster", nature="timid",
+                   evs=[2, 0, 0, 32, 0, 32], gender="F"),
+               mon("Staraptor", ["bravebird", "closecombat", "doubleedge",
+                                 "protect"],
+                   item="staraptite", ability="intimidate", nature="jolly",
+                   evs=ATK),
+               mon("Incineroar", ["fakeout", "throatchop", "flareblitz",
+                                  "partingshot"],
+                   item="sitrusberry", ability="intimidate", nature="careful",
+                   evs=[32, 2, 0, 0, 32, 0])],
+        "p2": [mon("Clefairy", ["followme", "helpinghand", "moonblast",
+                                "protect"],
+                   item="eviolite", ability="friendguard", nature="sassy",
+                   evs=[32, 0, 17, 0, 17, 0], gender="F"),
+               mon("Metagross", ["zenheadbutt", "bulletpunch", "ironhead",
+                                 "protect"],
+                   item="metagrossite", ability="clearbody", nature="jolly",
+                   evs=ATK)],
+        "hp": {},
+        "fainted": [],
+        "check": lambda info: (lambda boost: [
+            f"self-Tickle/Charm carries {boost:.0%} >= 25% into Follow Me — "
+            "the redirect stealing the boost is not priced in"
+        ] if boost >= 0.25 else [])(
+            _mass(info, "tickle>ally") + _mass(info, "charm>ally")),
+    },
 ]
 
 
@@ -238,11 +530,31 @@ def _joint_mass(info, slot_a, prefixes_a, slot_b, prefixes_b):
     return total
 
 
-def build_tracker(p1_sets, p2_sets, hp, fainted, cfg, weather=""):
-    """Return a ``LogParser`` seeded to the authored public scenario state."""
+def _opp_mass(info, sub):
+    """Predicted-opponent prior mass on joint actions whose description
+    contains ``sub`` (from the truncated top of ``info['opp_pred']``, so this
+    is a lower bound — good enough for 'is this line prominent')."""
+    return sum(p for desc, p in info["opp_pred"] if sub in desc)
+
+
+def build_tracker(p1_sets, p2_sets, hp, fainted, cfg, weather="",
+                  trickroom=False, mega=(), turn=9):
+    """Return a ``LogParser`` seeded to the authored public scenario state.
+
+    ``mega`` lists (side_id, team_idx) pairs that have already mega evolved:
+    the mon's public forme flips to its stone's mega and the side's mega is
+    spent, exactly what a real tracker holds after |detailschange|."""
     t = LogParser("scenario", 0, "", cfg.format_id)
     t.sides = {"p1": Side(p1_sets), "p2": Side(p2_sets)}
     t.weather = weather
+    t.trickroom = trickroom
+    dex = load_dex(cfg) or {"items": {}}
+    for pid, k in mega:
+        m = t.sides[pid].mons[k]
+        stone = dex["items"].get(m.set["item"], {}).get("megaStone") or {}
+        m.species_cur = stone.get(sid(m.set["species"]), m.species_cur)
+        m.mega_done = True
+        t.sides[pid].mega_used = True
     for pid, k in fainted:
         m = t.sides[pid].mons[k]
         m.fainted, m.hp, m.appeared = True, 0.0, True
@@ -251,50 +563,73 @@ def build_tracker(p1_sets, p2_sets, hp, fainted, cfg, weather=""):
         for m in side.mons:
             if slot > 1 or m.fainted:
                 continue
-            # mid-game endgame: on the field a while (no Fake Out artifacts)
+            # mid-game: on the field a while (no Fake Out artifacts)
             m.active_slot, m.appeared, m.turns_active = slot, True, 2
             slot += 1
     for (pid, k), frac in hp.items():
         t.sides[pid].mons[k].hp = frac
-    t.turn_no = 9
+    t.turn_no = turn
     return t
 
 
-def print_damage_matrix(searcher, p1_sets, p2_sets):
+def print_damage_matrix(searcher, p1_sets, p2_sets, weather="", fainted=()):
     """The scenario docs claim OHKO/2HKO patterns; print the actual numbers so
-    a reviewer can see whether the position is what the assertion assumes."""
+    a reviewer can see whether the position is what the assertion assumes.
+
+    Matches the engine's turn state: scenario weather is applied, stone
+    holders are calculated as their mega forme with the forme's own default
+    ability (megas resolve before moves), and fainted teammates feed Supreme
+    Overlord."""
     if not searcher.bridge:
         return
     from damage import request
     dex = load_dex(searcher.cfg) or {"items": {}}
+    field = {"weather": weather} if weather else None
+    down = {pid: sum(1 for p, _ in fainted if p == pid) for pid in ("p1", "p2")}
+
+    def effective(s):
+        """Mega-forme (default-ability) calc set for stone holders."""
+        stone = dex["items"].get(s["item"], {}).get("megaStone") or {}
+        mega_sp = stone.get(sid(s["species"]))
+        if mega_sp:
+            return {**s, "species": mega_sp, "ability": ""}
+        return {**s, "species": sid(s["species"])}
+
     for atk_sets, dfd_sets, tag in ((p1_sets, p2_sets, "p1"),
                                     (p2_sets, p1_sets, "p2")):
         for a in atk_sets:
-            stone = dex["items"].get(a["item"], {}).get("megaStone") or {}
-            a_sp = stone.get(sid(a["species"]), sid(a["species"]))
+            ea = {**effective(a), "alliesFainted": down[tag]}
             for d in dfd_sets:
+                ed = effective(d)
                 cells = searcher.bridge.calc_batch(
-                    [request({**a, "species": a_sp},
-                             {**d, "species": sid(d["species"])}, mv)
-                     for mv in a["moves"]])
-                print(f"  {tag} {a_sp} -> {sid(d['species'])}: " + "  ".join(
-                    f"{mv} {c[0]:.0%}-{c[1]:.0%}" if c else f"{mv} ?"
-                    for mv, c in zip(a["moves"], cells)))
+                    [request(ea, ed, mv, field) for mv in a["moves"]])
+                print(f"  {tag} {ea['species']} -> {ed['species']}: "
+                      + "  ".join(
+                          f"{mv} {c[0]:.0%}-{c[1]:.0%}" if c else f"{mv} ?"
+                          for mv, c in zip(a["moves"], cells)))
 
 
 def run_scenarios(searcher, cfg):
     """Run authored gates and return the integer failure count."""
     failures, ran = [], 0
     for scn in SCENARIOS:
-        print(f"\n--- {scn['name']} ---\n{scn['doc']}")
+        stage = scn.get("stage", "endgame")
+        print(f"\n--- {scn['name']} [{stage}"
+              + (", diagnostic" if scn.get("diagnostic") else "")
+              + f"] ---\n{scn['doc']}")
         if scn.get("needs_model") and searcher.model is None:
             print("  SKIP (needs a trained checkpoint)")
             continue
         ran += 1
-        print_damage_matrix(searcher, scn["p1"], scn["p2"])
+        print_damage_matrix(searcher, scn["p1"], scn["p2"],
+                            weather=scn.get("weather", ""),
+                            fainted=scn.get("fainted", []))
         tracker = build_tracker(scn["p1"], scn["p2"], scn["hp"],
                                 scn.get("fainted", []), cfg,
-                                weather=scn.get("weather", ""))
+                                weather=scn.get("weather", ""),
+                                trickroom=scn.get("trickroom", False),
+                                mega=scn.get("mega", ()),
+                                turn=scn.get("turn", 9))
         belief = determinized(scn["p2"], cfg)
         joint, info = searcher.choose(tracker, belief, "p1", None,
                                       my_brought=list(range(len(scn["p1"]))),

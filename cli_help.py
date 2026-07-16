@@ -259,8 +259,11 @@ HELP = {
           -h, --help         Show this help message and exit.
     """,
     "scenarios.py": """
-        Run tactical search correctness scenarios, mine replay endgames, or
-        reconstruct one previously mined endgame decision.
+        Run tactical scenarios (endgame solve-to-terminal gates plus
+        earlygame/midgame model diagnostics: switch-outs, weather wars,
+        Contrary boost lines), mine replay endgames, or reconstruct one
+        previously mined endgame decision. Diagnostics need a checkpoint
+        and print NOTEs; only endgame gates can fail the suite.
 
         Usage: python scenarios.py [options]
 
