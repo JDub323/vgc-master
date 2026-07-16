@@ -221,8 +221,13 @@ no custom battle GUI to maintain):
 3. open `https://play.pokemonshowdown.com/~~localhost:8000`, paste the
    printed team into Teambuilder → Import from text, and challenge the bot,
 4. watch `http://localhost:8010` — a live dashboard of the bot's brain:
-   the probability it assigns to **your** likely actions, its belief about
-   your items/speed (with sprites), and its win-confidence sparkline.
+   the probability it assigns to **your** likely actions (with the bot's
+   expected value for each of those branches and the search visits it spent
+   there), its belief about your items/speed (with sprites), and its
+   win-confidence sparkline. After every resolved turn it grades itself:
+   was the move you actually played inside its top-6 predictions, at what
+   rank/probability, and what it thought of the position if you played it —
+   plus a running top-6 hit-rate for the game.
 
 `python teams.py --mine` extracts the most common real high-rated team sheets
 from the dataset — legal by construction — to swap in for any replica the

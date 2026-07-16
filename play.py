@@ -40,7 +40,9 @@ import teams as teams_lib
 from agents.max_damage.v1 import MaxDamageChooser
 from agents.policy_only.v1 import PolicyOnlyChooser
 from agents.random.v1 import RandomChooser
+from agents.search.v1 import DecoupledUCTSearcher
 from config import CFG
+from data import sid
 from env import make_live_player
 from search.debug import belief_data
 
@@ -53,7 +55,31 @@ PolicyChooser = PolicyOnlyChooser  # backward-compatible import name
 
 STATE = {"status": "starting...", "turn": 0, "bot": "", "format": "",
          "value_history": [], "opp_pred": [], "strategy": [], "beliefs": [],
-         "field": [], "result": ""}
+         "field": [], "result": "",
+         "human": {"graded": 0, "hits": 0, "history": [], "last": None}}
+
+# wired up in main()/build_chooser(); on_decision is a plain callback and
+# env.make_live_player's hook signature stays untouched
+PLAYER = None      # the LivePlayer (owns the raw protocol lines)
+INNER = None       # the DeterminizedDUCTChooser behind the picked bot, if any
+PENDING = {}       # last decision's opponent prediction, graded next turn
+
+
+class CapturingSearcher(DecoupledUCTSearcher):
+    """v1 search brick that additionally keeps the last root
+    determinizations, so the dashboard can read the full opponent bandit
+    tables (prior, visits, Q) after each decision. Pure capture — selection,
+    backup, and aggregation behavior are inherited unchanged, and the hashed
+    v1 modules are not edited (this is the injectable-brick seam)."""
+
+    def __init__(self):
+        """Start with no captured roots."""
+        self.last_dets = []
+
+    def aggregate_root(self, dets, policy_only=False):
+        """Capture the determinizations, then aggregate as v1 does."""
+        self.last_dets = list(dets)
+        return super().aggregate_root(dets, policy_only)
 
 
 def _sprite(species_name):
@@ -61,15 +87,134 @@ def _sprite(species_name):
     return re.sub(r"[^a-z0-9-]", "", species_name.lower().replace(" ", ""))
 
 
+def _opp_rows():
+    """Aggregate the captured roots' opponent tables into display rows.
+
+    One row per distinct predicted joint action of the HUMAN, sorted by the
+    model's prior: ``p`` (det-averaged prior — 'how likely the bot thinks
+    you are to play this'), ``n`` (search visits spent on that branch), and
+    ``q`` — the bot's expected value *given you play it* (opponent tables
+    accumulate the negated searcher value, so this re-negates back to the
+    bot's perspective). Empty for choosers without a captured search."""
+    dets = getattr(getattr(INNER, "searcher", None), "last_dets", None) or []
+    agg = {}
+    for det in dets:
+        root = det.root
+        for a, p, n, w in zip(root.opp_actions, root.opp_p,
+                              root.opp_n, root.opp_w):
+            d = INNER._describe(det.seed_tracker, det.opp, a)
+            r = agg.setdefault(d, [0.0, 0.0, 0.0])
+            r[0] += p / len(dets)
+            r[1] += n
+            r[2] += w
+    rows = [{"desc": d, "p": p, "n": int(n),
+             "q": round(-w / n, 3) if n else None}
+            for d, (p, n, w) in agg.items()]
+    rows.sort(key=lambda r: -r["p"])
+    return rows
+
+
+def _human_actions(seg, you):
+    """Extract the human's chosen action per slot from one turn's protocol.
+
+    Mirrors the tracker's voluntary-action rules (data.LogParser._event):
+    called moves ([from] tags) don't count, a slot acts once, switches into
+    a fainted slot are forced replacements, |turn| ends the resolution.
+    Returns {slot: desc} in the same shape as the searcher's descriptions
+    ('ironhead>1', 'sw pelipper')."""
+    acts, moved, fainted = {}, set(), set()
+    slot_of = {"a": 0, "b": 1}
+    for line in seg:
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        cmd, ref = parts[1], parts[2]
+        if cmd == "turn" or cmd == "win":
+            break
+        if not ref.startswith(you):
+            continue
+        slot = slot_of.get(ref[2:3])
+        if cmd == "move" and slot is not None and slot not in moved:
+            moved.add(slot)
+            tags = [p for p in parts[4:] if p.startswith("[")]
+            if any(t.startswith("[from]") for t in tags):
+                continue                     # called/continued, not chosen
+            target = next((p for p in parts[4:]
+                           if re.match(r"p[12][ab]: ", p)), None)
+            tcode = ""
+            if target and not any(t.startswith("[spread]") for t in tags):
+                head = target.split(":")[0]
+                if not head.startswith(you):
+                    tcode = ">1" if head[2:3] == "a" else ">2"
+                elif slot_of.get(head[2:3]) != slot:
+                    tcode = ">ally"
+            acts[slot] = sid(parts[3]) + tcode
+        elif cmd == "switch" and slot is not None \
+                and slot not in moved and slot not in fainted:
+            moved.add(slot)
+            acts[slot] = "sw " + sid(parts[3].split(",")[0])
+        elif cmd == "faint" and slot is not None:
+            fainted.add(slot)
+    return acts
+
+
+def _grade_pending(tag, turn_now):
+    """Score the previous turn's prediction against what the human did.
+
+    Subset match: every observable slot action must equal that slot's part
+    of a predicted joint row (mega suffixes stripped — the flag isn't
+    visible on |move| lines). Appends the graded entry to STATE['human']."""
+    pend = dict(PENDING)
+    PENDING.clear()
+    if not pend or pend["tag"] != tag or turn_now <= pend["turn"] \
+            or not pend["rows"]:
+        return
+    seg = PLAYER.raw.get(tag, [])[pend["line_idx"]:] if PLAYER else []
+    acts = _human_actions(seg, pend["you"])
+    human = (acts.get(0), acts.get(1))
+    if not any(human):
+        return                               # fully unobservable turn
+
+    def matches(row):
+        parts = [x.strip() for x in
+                 row["desc"].replace("+mega", "").split(", ")]
+        return all(a is None or (len(parts) > s and parts[s] == a)
+                   for s, a in enumerate(human))
+
+    hit_idx = [i for i, r in enumerate(pend["rows"]) if matches(r)]
+    best = min(hit_idx) if hit_idx else None
+    top6 = best is not None and best < 6
+    entry = {"turn": pend["turn"],
+             "desc": " + ".join(a or "?" for a in human),
+             "partial": None in human,
+             "hit": top6,
+             "rank": None if best is None else best + 1,
+             "p": round(sum(pend["rows"][i]["p"] for i in hit_idx), 4),
+             "n": pend["rows"][best]["n"] if best is not None else 0,
+             "q": pend["rows"][best]["q"] if best is not None else None}
+    h = STATE["human"]
+    h["graded"] += 1
+    h["hits"] += top6
+    h["last"] = entry
+    h["history"] = (h["history"] + [entry])[-10:]
+
+
 def on_decision(battle, g, info):
     """Replace dashboard state from a live game and chooser ``ChoiceInfo``."""
     me = battle.player_role
     you = "p2" if me == "p1" else "p1"
     t = g["tracker"]
+    _grade_pending(battle.battle_tag, t.turn_no)
+    rows = _opp_rows()
+    if rows:
+        PENDING.update(tag=battle.battle_tag, turn=t.turn_no, you=you,
+                       line_idx=g["fed"], rows=rows)
     STATE["turn"] = t.turn_no
     STATE["status"] = f"turn {t.turn_no} — bot has chosen"
     STATE["value_history"] = (STATE["value_history"] + [round(info["value"], 3)])[-60:]
-    STATE["opp_pred"] = [{"desc": d, "p": p} for d, p in info["opp_pred"][:6]]
+    STATE["opp_pred"] = [{"desc": r["desc"], "p": r["p"], "q": r["q"],
+                          "n": r["n"]} for r in rows[:6]] or \
+        [{"desc": d, "p": p} for d, p in info["opp_pred"][:6]]
     STATE["strategy"] = [{"desc": d, "p": p} for d, p in info["strategy"][:6]]
     beliefs = []
     for d, m in zip(belief_data(g["belief"]), t.sides[you].mons):
@@ -116,6 +261,12 @@ border-radius:5px;transition:width .5s ease}
 .mon .hp i.low{background:var(--bad)}
 .tag{display:inline-block;background:#3b2530;color:#fda4af;border-radius:4px;
 padding:0 6px;font-size:11px;margin-left:6px}
+.q{flex:0 0 52px;text-align:right;color:var(--dim);font-size:11px}
+.badge{display:inline-block;border-radius:4px;padding:0 7px;font-size:11px;font-weight:bold}
+.badge.ok{background:#14532d;color:#4ade80}
+.badge.bad{background:#4c1d1d;color:var(--bad)}
+.hrow{color:var(--dim);font-size:12px;padding:1px 0}
+.hrow b{color:var(--ink);font-weight:normal}
 .dead{opacity:.35;filter:grayscale(1)}
 svg polyline{fill:none;stroke:var(--acc);stroke-width:2}
 svg line{stroke:#2a3550;stroke-width:1}
@@ -134,7 +285,9 @@ details{margin-top:4px}summary{cursor:pointer;color:var(--dim)}
   <div class="faint">-1 = you win &nbsp; +1 = bot wins &nbsp; turn <span id="turn">0</span></div>
   <div id="result"></div></div>
  <div class="card"><h2>It expects YOU to…</h2><div id="pred"></div>
+  <div class="faint">right column: its win read (+1 = bot wins) if you play that line</div>
   <details><summary>its own plan (spoilers)</summary><div id="plan"></div></details></div>
+ <div class="card"><h2>Did it see your move coming?</h2><div id="human"></div></div>
  <div class="card"><h2>On the field</h2><div id="field"></div></div>
 </div>
 <div>
@@ -143,9 +296,25 @@ details{margin-top:4px}summary{cursor:pointer;color:var(--dim)}
 </div>
 <script>
 const S=id=>document.getElementById(id);
+const fq=q=>q==null?"":`${q>=0?"+":""}${q.toFixed(2)}`;
 const bars=(rows,max)=>rows.map(r=>`<div class="row"><span class="lbl">${r.desc??r.item}</span>
 <span class="bar"><i style="width:${(100*r.p/(max||1)).toFixed(1)}%"></i></span>
-<span class="pct">${(100*r.p).toFixed(0)}%</span></div>`).join("");
+<span class="pct">${(100*r.p).toFixed(0)}%</span>${
+ "q" in r?`<span class="q" title="bot's expected value if you play this (${r.n??0} search visits)">${fq(r.q)}</span>`:""}</div>`).join("");
+function humanCard(H){
+ if(!H||!H.graded&&!H.last)return '<div class="faint">resolves after your first turn…</div>';
+ let out="";
+ if(H.last){const L=H.last;
+  out+=`<div class="row"><span class="badge ${L.hit?"ok":"bad"}">${L.hit?"#"+L.rank+" of top-6":"not in top-6"}</span>
+   <span style="flex:1">T${L.turn}: ${L.desc}${L.partial?" <span class='faint'>(one slot hidden)</span>":""}</span></div>`;
+  out+=`<div class="faint">it gave your line ${(100*L.p).toFixed(0)}%`
+    +(L.n?` · spent ${L.n} search visits there`:"")
+    +(L.q!=null?` · win read if you play it: ${fq(L.q)}`:"")+`</div>`;}
+ if(H.graded)out+=`<div class="faint" style="margin-top:4px">season score: ${H.hits}/${H.graded} of your turns were in its top-6</div>`;
+ const past=(H.history||[]).slice(0,-1).reverse();
+ if(past.length)out+=past.map(e=>`<div class="hrow">T${e.turn} ${e.hit?"✓":"✗"}${e.rank?"#"+e.rank:""} <b>${e.desc}</b> ${(100*e.p).toFixed(0)}%${e.q!=null?" · "+fq(e.q):""}</div>`).join("");
+ return out;
+}
 const sprite=s=>`https://play.pokemonshowdown.com/sprites/gen5/${s}.png`;
 // unknown forme id -> retry the base species ('foo-forme' -> 'foo');
 // if that fails too (no dash left), hide instead of showing a broken icon
@@ -161,6 +330,7 @@ async function tick(){
   S("line").setAttribute("points",pts.join(" "));
   S("pred").innerHTML=bars(d.opp_pred,Math.max(...d.opp_pred.map(r=>r.p),0.01));
   S("plan").innerHTML=bars(d.strategy,Math.max(...d.strategy.map(r=>r.p),0.01));
+  S("human").innerHTML=humanCard(d.human);
   S("field").innerHTML=d.field.map(side=>`<div class="row"><span class="lbl">${side.side}</span>`+
    side.mons.map(m=>`<img title="${m.status}" src="${sprite(m.sprite)}" onerror="${FALLBACK}" width="40" height="40" style="image-rendering:pixelated">`).join("")+`</div>`).join("");
   S("beliefs").innerHTML=d.beliefs.map(b=>`<div class="mon ${b.fainted?"dead":""}">
@@ -251,7 +421,12 @@ BOTS = [("search", "full DUCT search (strongest, slowest)"),
 
 
 def build_chooser(kind, ckpt, cfg, debug):
-    """Return the requested versioned/baseline ``MoveChooser``."""
+    """Return the requested versioned/baseline ``MoveChooser``.
+
+    Net-backed choosers get the ``CapturingSearcher`` brick injected and are
+    remembered in ``INNER`` so the dashboard can read the opponent tables;
+    the floor bots have no search to capture and leave ``INNER`` unset."""
+    global INNER
     if kind == "random":
         return RandomChooser()
     if kind == "max-damage":
@@ -264,7 +439,8 @@ def build_chooser(kind, ckpt, cfg, debug):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     searcher = DeterminizedDUCTChooser(
         PolicyValueNet.load(ckpt, cfg, device), PositionTokenizer.load(cfg),
-        cfg, debug=debug)
+        cfg, debug=debug, searcher=CapturingSearcher())
+    INNER = searcher
     return searcher if kind == "search" else PolicyOnlyChooser(searcher)
 
 
@@ -304,6 +480,8 @@ def main(cfg=CFG):
         server_configuration=ServerConfiguration(
             f"ws://localhost:{cfg.showdown_port}/showdown/websocket",
             "https://play.pokemonshowdown.com/action.php?"))
+    global PLAYER
+    PLAYER = player            # _grade_pending reads the raw protocol lines
 
     print("\n" + "=" * 72)
     print(f"1. open   https://play.pokemonshowdown.com/~~localhost:{cfg.showdown_port}")
