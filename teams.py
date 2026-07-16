@@ -934,6 +934,9 @@ def import_pool(path, cfg=CFG, seed=0):
     'good teams' database exports. Redacted spreads (no EVs/serious) are
     filled like build_pool; explicit EVs and natures are kept as-is."""
     text = Path(path).read_text()
+    if not text.strip():
+        print(f"{path} is empty — nothing to import")
+        return
     chunks = []
     if re.search(r"^===", text, re.M):
         for block in re.split(r"^===.*===\s*$", text, flags=re.M):
