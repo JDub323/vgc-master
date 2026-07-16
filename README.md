@@ -584,6 +584,16 @@ All gated behind flags; zero cost when off ([search/debug.py](search/debug.py)):
   cProfile dump for snakeviz/speedscope, complementing the phase buckets.
   For sampling flamegraphs run py-spy externally:
   `py-spy record -- python scenarios.py`.
+- **[profile_selfplay.py](profile_selfplay.py)**: aggregate throughput
+  profiler for game playing — plays real games through the self-play
+  skeleton with the phase profiler on and reports moves/min, sims/s,
+  per-move latency percentiles, the phase time table summed over the whole
+  run, and net batching stats (calls, avg batch size, positions/s). Where
+  `--debug` answers "what did this move cost", this answers "what bounds
+  data generation". Runs a random-init baseline-architecture net when no
+  checkpoint is present. `python profile_selfplay.py --games 3` or
+  `--max-decisions 20 --sims 100` for a quick read; `--cprofile` works
+  here too.
 - **`evaluate.py --worst N`**: decodes the N held-out positions where the
   model assigns the human's actual move the least probability — the fixed
   token layout decodes back into a readable position, so you see exactly

@@ -191,6 +191,28 @@ HELP = {
                              the test split).
           -h, --help         Show this help message and exit.
     """,
+    "profile_selfplay.py": """
+        Throughput profiler for game playing / self-play generation: plays
+        real games through the self-play skeleton with the search phase
+        profiler on, then reports moves/min, sims/s, per-move latency, a
+        phase time table (sidecar RPC / net / tokenize / ...), and net
+        batching stats. Runs a random-init baseline-architecture net when no
+        checkpoint is available (throughput-representative).
+
+        Usage: python profile_selfplay.py [options]
+
+        Options:
+          --games N          Games to play (default: 1).
+          --max-decisions M  Stop after M search decisions across games.
+          --sims S           Override cfg.sims_per_move.
+          --dets K           Override cfg.n_determinizations.
+          --policy-only      Skip simulations; play from raw net priors.
+          --ckpt PATH        Checkpoint (default: ckpt_best.pt, then
+                             selfplay/sp_last.pt, then random init).
+          --seed N           RNG seed (default: 0).
+          --cprofile PATH    Also dump cProfile stats for snakeviz/speedscope.
+          -h, --help         Show this help message and exit.
+    """,
     "observe_game.py": """
         Run search-vs-search simulator games and print decisions, beliefs, and
         mixed strategies turn by turn.
