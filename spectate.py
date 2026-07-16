@@ -152,11 +152,19 @@ class GameFeed:
 class Spectator:
     """Thread-safe multi-game live dashboard and replay coordinator."""
 
-    def __init__(self, run_name, cfg=CFG, live=False, port=8020, save=True):
-        """Configure output/live server and initialize feed registries."""
+    def __init__(self, run_name, cfg=CFG, live=False, port=8020, save=True,
+                 controls=None):
+        """Configure output/live server and initialize feed registries.
+
+        ``controls`` (optional) is a runner-owned object with ``state() ->
+        dict`` and ``action(cmd, arg) -> str``; when present the dashboard
+        shows a control panel (skip matchup, worker +/-, pause) wired to
+        ``/controls.json`` and ``/control?cmd=...`` — the spectator itself
+        stays a passive viewer."""
         self.dir = cfg.artifacts_dir / "replays" / _slug(run_name)
         self.run_name = run_name
         self.save = save
+        self.controls = controls
         if save:
             self.dir.mkdir(parents=True, exist_ok=True)
         self.games = {}          # gid -> meta dict (+ its GameFeed)
@@ -216,6 +224,18 @@ class Spectator:
                         "meta": md,
                         "log": feed.public_lines() if feed else []}).encode(),
                         "application/json")
+                elif self.path.startswith("/controls.json"):
+                    body = sp.controls.state() if sp.controls else {"off": True}
+                    self._send(json.dumps(body).encode(), "application/json")
+                elif self.path.startswith("/control"):
+                    from urllib.parse import parse_qs, urlparse
+                    q = parse_qs(urlparse(self.path).query)
+                    msg = sp.controls.action(
+                        (q.get("cmd") or [""])[0], (q.get("arg") or [""])[0]) \
+                        if sp.controls else "no controls attached"
+                    print(f"  [dashboard] {msg}")
+                    self._send(json.dumps({"msg": msg}).encode(),
+                               "application/json")
                 else:
                     self._send(PAGE.encode(), "text/html")
 
@@ -259,8 +279,30 @@ h1{font-size:15px;color:var(--acc);margin-bottom:2px}
 .ev.turn{color:var(--acc);margin-top:9px;border-top:1px dashed var(--line);padding-top:6px}
 .ev.faint{color:var(--lose)}.ev.dim{color:var(--dim)}.ev.win{color:var(--win);font-size:15px;margin-top:10px}
 .empty{color:var(--dim);margin-top:40px;text-align:center}
+#ctl{display:none;background:var(--card);border:1px solid var(--acc);border-radius:9px;padding:10px 12px;margin-bottom:12px}
+#ctl .t{color:var(--acc);font-size:12px}#ctl .m{color:var(--dim);font-size:11px;margin-top:3px}
+#ctl button{background:var(--bar);border:1px solid var(--line);border-radius:6px;color:var(--ink);
+font:inherit;font-size:11px;padding:3px 8px;margin:6px 4px 0 0;cursor:pointer}
+#ctl button:hover{border-color:var(--acc)}
+#ctl button.warn{color:#fbbf24}
+#ctl table{width:100%;border-collapse:collapse;margin-top:8px;font-size:11px}
+#ctl td{padding:1px 4px;color:var(--dim)}#ctl td:first-child{color:var(--ink)}
+#ctl .paused{color:#fbbf24}
 </style></head><body>
-<div id="side"><h1>spectate</h1><div class="hint" id="run">…</div><div id="list"></div></div>
+<div id="side"><h1>spectate</h1><div class="hint" id="run">…</div>
+<div id="ctl">
+ <div class="t" id="ctl-pair"></div>
+ <div class="m" id="ctl-stats"></div>
+ <div class="m" id="ctl-workers"></div>
+ <div>
+  <button class="warn" onclick="ctl('skip')" title="drop this matchup's queued games; in-flight games finish">skip matchup</button>
+  <button onclick="ctl('workers','-1')">&minus; worker</button>
+  <button onclick="ctl('workers','1')">+ worker</button>
+  <button id="ctl-pause" onclick="ctl(ctlPaused?'resume':'pause')"></button>
+ </div>
+ <table id="ctl-standings"></table>
+</div>
+<div id="list"></div></div>
 <div id="main"><div class="empty" id="main-empty">← pick a game to watch</div>
 <div id="viewer" style="display:none">
 <h1 id="vtitle"></h1><div class="hint" id="vmeta"></div>
@@ -284,6 +326,29 @@ async function lobby(){
  setTimeout(lobby,1500);
 }
 function pick(id){sel=id;$('main-empty').style.display='none';$('viewer').style.display='block';view();}
+let ctlPaused=false;
+async function ctl(cmd,arg){try{await fetch(`control?cmd=${cmd}&arg=${arg||''}`);}catch(e){}ctlTick(true);}
+async function ctlTick(once){
+ try{const c=await(await fetch('controls.json')).json();
+  if(!c.off){
+   $('ctl').style.display='block';
+   ctlPaused=!!c.paused;
+   $('ctl-pair').textContent=(c.pairing||'idle')+(c.plan_total>1?`  (${c.plan_done+1}/${c.plan_total})`:'');
+   $('ctl-stats').textContent=c.pairing?
+    `game ${c.done}/${c.total} · A ${c.wins_a}-${c.wins_b}${c.ties?'-'+c.ties:''} B · `+
+    `${c.s_per_game?c.s_per_game.toFixed(0)+'s/game · ':''}`+
+    `${c.eta_min!=null?'~'+c.eta_min+'min left':''}${c.paused?'  — PAUSED':''}`:'';
+  $('ctl-workers').textContent=`workers ${c.workers_alive}/${c.workers_target} (live/target)`+
+    (c.budget_s?` · move budget ${c.budget_s}s`:'');
+   $('ctl-pause').textContent=c.paused?'resume':'pause';
+   $('ctl-pause').className=c.paused?'warn':'';
+   $('ctl-standings').innerHTML=(c.standings||[]).map(r=>
+    `<tr><td>${r.name}</td><td>${r.rating.toFixed(0)}</td><td>${r.games}g</td><td>${r.spm.toFixed(1)}s/mv</td></tr>`).join('');
+  }
+ }catch(e){}
+ if(!once)setTimeout(ctlTick,2000);
+}
+ctlTick();
 // parse the public protocol into current field + a readable event feed
 function render(log,meta){
  const pos={p1a:null,p1b:null,p2a:null,p2b:null};

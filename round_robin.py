@@ -23,6 +23,13 @@ Schedules: `play A B` runs one pairing over the full replica-team grid;
 "baseline") — this keeps the Bradley-Terry graph connected at N series
 instead of N(N-1)/2; `all` is the full round robin, best saved for finalists.
 
+play/star/all default to a live web dashboard (spectate.py, port 8020 — the
+opened port triggers VS Code's forward popup): per-game trackers you can flip
+between, plus a control panel — skip the current matchup (e.g. random vs
+baseline dragging on), grow/shrink the worker pool between games, pause and
+resume, live pairing score/ETA and pile standings. `--no-live` restores the
+headless run.
+
 CLI: python round_robin.py list [--pile P]
      python round_robin.py play A B [options]
      python round_robin.py star [--anchor NAME] [options]
@@ -30,6 +37,7 @@ CLI: python round_robin.py list [--pile P]
      python round_robin.py standings [--pile P]
 Options: --pile P --workers N --quick N --repeat N --move-budget S
          --hang-timeout S --temp T --label TAG --no-save
+         --no-live --dash-port P
 """
 
 if __name__ == "__main__":
@@ -93,6 +101,103 @@ def read_ledger(pile):
 
 class AgentDied(Exception):
     """A contestant process crashed or hung; the game is a forfeit."""
+
+
+class TournamentControls:
+    """Runner-owned live control state behind the spectator dashboard.
+
+    The dashboard (spectate.py) calls ``state()`` for its panel and
+    ``action()`` for its buttons; ``run_pairing``'s worker pool obeys the
+    resulting flags: *skip matchup* drains the current pairing's queued jobs
+    (in-flight games finish and are still recorded), *workers +/-* grows or
+    shrinks the pool between games (each worker owns a sidecar plus one
+    subprocess per contestant, so growth is capped), *pause* stops workers
+    from picking up new games without killing anything."""
+
+    MAX_WORKERS = 8
+
+    def __init__(self, workers, pile=None, budget=None):
+        """Set initial worker target and the pile used for live standings."""
+        self.lock = threading.Lock()
+        self.target_workers = max(1, int(workers))
+        self.paused = False
+        self.pile, self.budget = pile, budget
+        self.plan_done = 0
+        self.plan_total = 1
+        self._live = None                  # attached by run_pairing
+        self._standings = (0.0, [])        # (fetched_at, rows) 10s cache
+
+    def attach(self, label, jobs, results, lock, t0, alive):
+        """Register the running pairing's shared structures; return None."""
+        with self.lock:
+            self._live = {"label": label, "jobs": jobs, "results": results,
+                          "lock": lock, "t0": t0, "alive": alive,
+                          "total": len(jobs)}
+
+    def detach(self):
+        """Mark the current pairing finished; return None."""
+        with self.lock:
+            self._live = None
+            self.plan_done += 1
+
+    def state(self):
+        """Return the JSON-safe control-panel snapshot."""
+        with self.lock:
+            live = self._live
+            out = {"paused": self.paused, "workers_target": self.target_workers,
+                   "budget_s": self.budget, "plan_done": self.plan_done,
+                   "plan_total": self.plan_total, "pairing": None,
+                   "workers_alive": 0, "standings": self._standings_rows()}
+        if live:
+            with live["lock"]:
+                done = len(live["results"])
+                out.update(
+                    pairing=live["label"], done=done, total=live["total"],
+                    jobs_left=len(live["jobs"]),
+                    workers_alive=len(live["alive"]),
+                    wins_a=sum(r["winner"] == "a" for r in live["results"]),
+                    wins_b=sum(r["winner"] == "b" for r in live["results"]),
+                    ties=sum(r["winner"] == "tie" for r in live["results"]))
+            if done:
+                per = (time.time() - live["t0"]) / done
+                out["s_per_game"] = per
+                out["eta_min"] = round(per * out["jobs_left"] / 60)
+        return out
+
+    def action(self, cmd, arg=""):
+        """Apply one dashboard action; return a human-readable message."""
+        if cmd == "skip":
+            with self.lock:
+                live = self._live
+            if not live:
+                return "nothing to skip"
+            with live["lock"]:
+                n = len(live["jobs"])
+                live["jobs"].clear()
+            return f"skipped {n} queued games of {live['label']} " \
+                   "(in-flight games finish)"
+        if cmd == "workers":
+            with self.lock:
+                self.target_workers = min(
+                    self.MAX_WORKERS,
+                    max(1, self.target_workers + int(arg or 0)))
+                return f"worker target -> {self.target_workers}"
+        if cmd in ("pause", "resume"):
+            with self.lock:
+                self.paused = cmd == "pause"
+            return f"{cmd}d"
+        return f"unknown control '{cmd}'"
+
+    def _standings_rows(self):
+        """Return dashboard standings rows, refreshed at most every 10 s.
+        Callers hold self.lock."""
+        now = time.time()
+        if self.pile and now - self._standings[0] > 10:
+            try:
+                self._standings = (now, bt_rows(read_ledger(self.pile))[:12])
+            except Exception:
+                self._standings = (now, [])
+        return self._standings[1]
 
 
 class AgentProcess:
@@ -277,12 +382,19 @@ def play_rpc_game(sc, agents, sets_by_side, cfg, seed, temperature, budget,
 
 def run_pairing(name_a, name_b, pile, bundles, cfg=CFG, workers=2, quick=None,
                 repeat=1, budget=None, hang_timeout=300.0, temperature=0.0,
-                label=None, save_replays=True, verbose=True):
+                label=None, save_replays=True, verbose=True, spectator=None,
+                controls=None):
     """One full series between two bundles; append rows to the pile ledger.
 
     Mirrors benchmark.run_series: every ordered replica-team pairing, engine
     sides alternating by game parity, per-game seeds derived from the game
-    index so a series is repeatable up to search nondeterminism."""
+    index so a series is repeatable up to search nondeterminism.
+
+    ``spectator``/``controls`` are normally created once by ``main`` and
+    shared across a star/all run so one dashboard covers every pairing;
+    without them behavior is the old headless save-only run. With controls
+    the worker pool is dynamic: it obeys the live worker target, the pause
+    flag, and the skip action (which drains this pairing's queued jobs)."""
     assert name_a != name_b, \
         "mirror matches need two exports of the same bundle under two names " \
         "(one process cannot play both sides of a game)"
@@ -293,8 +405,7 @@ def run_pairing(name_a, name_b, pile, bundles, cfg=CFG, workers=2, quick=None,
     run_tag = f"{name_a}_vs_{name_b}" + (f"_{label}" if label else "")
     run_id = f"{run_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    spectator = None
-    if save_replays:
+    if spectator is None and save_replays:
         try:
             from spectate import Spectator
             spectator = Spectator(run_tag, cfg, live=False, save=True)
@@ -303,7 +414,11 @@ def run_pairing(name_a, name_b, pile, bundles, cfg=CFG, workers=2, quick=None,
             print(f"  replay saving unavailable: {exc}")
 
     lock, results, t0 = threading.Lock(), [], time.time()
+    alive = set()                           # live worker ids, guarded by lock
     coordinator_commit = git_commit()
+    if controls:
+        controls.attach(f"{name_a} vs {name_b}", jobs, results, lock, t0,
+                        alive)
 
     def row_for(g, ta, tb, side_of, winner, turns, stats, forfeit):
         """Build one ledger row from a finished game."""
@@ -348,7 +463,15 @@ def run_pairing(name_a, name_b, pile, bundles, cfg=CFG, workers=2, quick=None,
                 with lock:
                     if not jobs:
                         return
-                    g, ta, tb = jobs.pop(0)
+                    if controls and len(alive) > controls.target_workers:
+                        alive.discard(wid)      # pool shrunk: retire quietly
+                        return
+                    job = None if controls and controls.paused \
+                        else jobs.pop(0)
+                if job is None:
+                    time.sleep(0.5)             # paused: hold, don't exit
+                    continue
+                g, ta, tb = job
                 side_of = {"a": "p1", "b": "p2"} if g % 2 == 0 else \
                           {"a": "p2", "b": "p1"}
                 sets = {side_of["a"]: team_sets[ta],
@@ -373,16 +496,41 @@ def run_pairing(name_a, name_b, pile, bundles, cfg=CFG, workers=2, quick=None,
                               f"{row['winner']}   (A {wa}/{n}, "
                               f"{(time.time() - t0) / n:.0f}s/game)")
         finally:
+            with lock:
+                alive.discard(wid)
             for ap in procs.values():
                 ap.close()
             sc.close()
 
-    threads = [threading.Thread(target=worker, args=(w,), daemon=True)
-               for w in range(max(1, workers))]
-    for t in threads:
+    threads, next_wid = [], 0
+
+    def spawn():
+        """Start one more worker thread (caller holds no locks)."""
+        nonlocal next_wid
+        wid = next_wid
+        next_wid += 1
+        with lock:
+            alive.add(wid)
+        t = threading.Thread(target=worker, args=(wid,), daemon=True)
+        threads.append(t)
         t.start()
+
+    for _ in range(max(1, workers)):
+        spawn()
+    # pool manager: grow toward the (possibly dashboard-adjusted) target
+    # while jobs remain; shrinking happens inside the workers themselves
+    while True:
+        with lock:
+            n_alive, jobs_left = len(alive), len(jobs)
+        if not n_alive:
+            break
+        if controls and jobs_left and n_alive < controls.target_workers:
+            spawn()
+        time.sleep(0.5)
     for t in threads:
         t.join()
+    if controls:
+        controls.detach()
     report(name_a, name_b, results)
     return results
 
@@ -413,12 +561,12 @@ def report(name_a, name_b, results):
               + (f", forfeits {forfeits}" if forfeits else ""))
 
 
-def standings(pile):
-    """Bradley-Terry ratings over every ledger row, one pool, with health."""
-    rows = read_ledger(pile)
+def bt_rows(rows):
+    """Bradley-Terry table rows over ledger results, best first — shared by
+    the CLI standings printer and the live dashboard panel."""
+    import math
     if not rows:
-        print(f"no results in {ledger_path(pile)} — run some games first")
-        return
+        return []
     players = sorted({r["a"] for r in rows} | {r["b"] for r in rows})
     wins = {p: {q: 0.0 for q in players} for p in players}
     info = {p: {"arch": "?", "commit": "", "moves": 0, "wall": 0.0,
@@ -448,18 +596,32 @@ def standings(pile):
                 rating[p] = max(num / den, 1e-9)
         m = sum(rating.values()) / len(rating)
         rating = {p: v / m for p, v in rating.items()}
-    import math
+    out = []
+    for p in sorted(players, key=lambda p: -rating[p]):
+        i = info[p]
+        out.append({"name": p, "rating": 1500 + 400 * math.log10(rating[p]),
+                    "arch": i["arch"], "commit": i["commit"],
+                    "games": int(sum(wins[p].values())
+                                 + sum(wins[q][p] for q in players)),
+                    "spm": i["wall"] / max(1, i["moves"]),
+                    "forfeits": i["forfeits"]})
+    return out
+
+
+def standings(pile):
+    """Print Bradley-Terry ratings over every ledger row, one pool."""
+    rows = read_ledger(pile)
+    if not rows:
+        print(f"no results in {ledger_path(pile)} — run some games first")
+        return
     print(f"pile standings ({len(rows)} games):")
     print(f"{'rating':>7s}  {'agent':20s} {'architecture':26s} "
           f"{'s/move':>7s} {'games':>6s}  notes")
-    for p in sorted(players, key=lambda p: -rating[p]):
-        games = sum(wins[p].values()) + sum(wins[q][p] for q in players)
-        i = info[p]
-        notes = (f"commit {i['commit']}"
-                 + (f", {i['forfeits']} forfeits" if i["forfeits"] else ""))
-        print(f"{1500 + 400 * math.log10(rating[p]):7.0f}  {p:20s} "
-              f"{i['arch']:26s} {i['wall'] / max(1, i['moves']):7.2f} "
-              f"{games:6.0f}  {notes}")
+    for r in bt_rows(rows):
+        notes = (f"commit {r['commit']}"
+                 + (f", {r['forfeits']} forfeits" if r["forfeits"] else ""))
+        print(f"{r['rating']:7.0f}  {r['name']:20s} {r['arch']:26s} "
+              f"{r['spm']:7.2f} {r['games']:6d}  {notes}")
 
 
 def list_bundles(pile):
@@ -500,38 +662,65 @@ def main(cfg=CFG):
         return
 
     bundles = load_pile(pile)
+    workers = int(opt("--workers", 2))
+    save = "--no-save" not in args
     kw = dict(cfg=cfg,
-              workers=int(opt("--workers", 2)),
+              workers=workers,
               quick=int(opt("--quick", 0)) or None,
               repeat=int(opt("--repeat", 1)),
               budget=float(opt("--move-budget", 0)) or None,
               hang_timeout=float(opt("--hang-timeout", 300)),
               temperature=float(opt("--temp", 0.0)),
               label=opt("--label"),
-              save_replays="--no-save" not in args)
+              save_replays=save)
+    if cmd not in ("play", "star", "all"):
+        print(__doc__)
+        return
+
+    def dashboard(run_label, plan_total=1):
+        """One live spectator + control panel shared by every pairing.
+        --no-live keeps the old headless (still replay-saving) behavior."""
+        if "--no-live" in args:
+            return None, None
+        from spectate import Spectator
+        controls = TournamentControls(workers, pile=pile, budget=kw["budget"])
+        controls.plan_total = plan_total
+        spectator = Spectator(run_label, cfg, live=True,
+                              port=int(opt("--dash-port", 8020)), save=save,
+                              controls=controls)
+        if save:
+            print(f"  saving replays under {spectator.dir}/")
+        print("  dashboard: game trackers, skip-matchup, worker +/- and "
+              "pause live at the URL above")
+        return spectator, controls
+
     if cmd == "play":
         a, b = args[1], args[2]
         for name in (a, b):
             assert name in bundles, f"no bundle '{name}' (round_robin.py list)"
-        run_pairing(a, b, pile, bundles, **kw)
+        spectator, controls = dashboard(f"{a}_vs_{b}")
+        run_pairing(a, b, pile, bundles, spectator=spectator,
+                    controls=controls, **kw)
     elif cmd == "star":
         anchor = opt("--anchor", "baseline")
         assert anchor in bundles, \
             f"anchor bundle '{anchor}' not in the pile — export it first"
-        for name in bundles:
-            if name != anchor:
-                print(f"\n=== {name} vs {anchor} ===")
-                run_pairing(name, anchor, pile, bundles, **kw)
+        others = [n for n in bundles if n != anchor]
+        spectator, controls = dashboard(f"star_{anchor}", len(others))
+        for name in others:
+            print(f"\n=== {name} vs {anchor} ===")
+            run_pairing(name, anchor, pile, bundles, spectator=spectator,
+                        controls=controls, **kw)
         standings(pile)
     elif cmd == "all":
         names = sorted(bundles)
-        for i, a in enumerate(names):
-            for b in names[i + 1:]:
-                print(f"\n=== {a} vs {b} ===")
-                run_pairing(a, b, pile, bundles, **kw)
+        pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+        spectator, controls = dashboard("all", len(pairs))
+        for a, b in pairs:
+            print(f"\n=== {a} vs {b} ===")
+            run_pairing(a, b, pile, bundles, spectator=spectator,
+                        controls=controls, **kw)
         standings(pile)
-    else:
-        print(__doc__)
 
 
 if __name__ == "__main__":

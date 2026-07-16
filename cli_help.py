@@ -68,6 +68,10 @@ HELP = {
           --temp T           Action temperature sent to agents (default: 0).
           --label TEXT       Tag for the run id and replay directory.
           --no-save          Do not save replay log/HTML files.
+          --no-live          Headless: skip the live control dashboard that
+                             play/star/all open by default (game trackers,
+                             skip matchup, worker +/-, pause, standings).
+          --dash-port P      Dashboard port (default: 8020).
           -h, --help         Show this help message and exit.
     """,
     "benchmark.py": """
