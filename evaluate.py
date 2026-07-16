@@ -255,24 +255,17 @@ def value_report(values, ds, tok, cfg):
     unobservable (flinch, sleep, KO'd before acting) and that correlates with
     losing, so the winner's side contributes more rows and "always predict
     win" already scores the base rate. Predicting 0 everywhere gives MSE
-    1.000. And the HP differential is what a value head must beat to have
-    learned anything beyond counting HP — if it doesn't, search built on it
-    inherits exactly the myopia `rollout_depth` exists to paper over."""
+    1.000, and 0.5 everywhere gives Brier 0.250. The HP differential (sign of
+    summed HP%, scored on the rows with an HP edge — the rest are mostly turn
+    1) is what a value head must beat to have learned anything beyond
+    counting HP — if it doesn't, search built on it inherits exactly the
+    myopia `rollout_depth` exists to paper over."""
     z = ds.value.astype(np.float64)
     v = np.clip(values, -1.0, 1.0)
     p, y = (v + 1) / 2, (z + 1) / 2          # win probability / outcome
     n = len(z)
     sign_acc = float(np.mean(np.sign(v) == np.sign(z)))
     base = float(y.mean())
-    print(f"\nvalue head vs final outcome ({n} test transitions, "
-          f"unweighted; z = +1 win / -1 loss):")
-    print(f"  MSE          {np.mean((v - z) ** 2):.3f}   "
-          f"(predicting 0 everywhere = 1.000)")
-    print(f"  MAE          {np.mean(np.abs(v - z)):.3f}")
-    print(f"  Brier        {np.mean((p - y) ** 2):.3f}   "
-          f"(predicting 0.5 everywhere = 0.250)")
-    print(f"  sign acc     {sign_acc:.1%}   (does it pick the winner?)")
-    print(f"  mean |v|     {np.mean(np.abs(v)):.3f}   (mean confidence)")
 
     hp = _token_lookup(tok, "HP_")
     hp_of = lambda base_i: np.nansum(
@@ -282,19 +275,24 @@ def value_report(values, ds, tok, cfg):
     edge = diff != 0
     hp_acc = float(np.mean(np.sign(diff[edge]) == np.sign(z[edge]))) \
         if edge.any() else float("nan")
-    print("\n  floors it has to beat:")
-    print(f"    base rate      {max(base, 1 - base):.1%}   "
-          f'("always predict win"; labels are {base:.1%} wins, not 50/50 — '
-          f"prep drops unobservable-action rows and that tracks losing)")
-    print(f"    HP differential{hp_acc:>7.1%}   (sign of summed HP%, on the "
-          f"{edge.mean():.0%} of rows with an HP edge; the rest are ties, "
-          f"mostly turn 1)")
-    print(f"    value head     {sign_acc:>7.1%}   "
-          f"({sign_acc - max(base, 1 - base):+.1%} vs base rate)")
+
+    print(f"\nvalue head vs final outcome ({n} test transitions, unweighted; "
+          f"z = +1 win / -1 loss)")
+    print(f"  MSE {np.mean((v - z) ** 2):.3f}   "
+          f"MAE {np.mean(np.abs(v - z)):.3f}   "
+          f"Brier {np.mean((p - y) ** 2):.3f}   "
+          f"sign acc {sign_acc:.1%}   mean |v| {np.mean(np.abs(v)):.3f}")
+    print("\n  sign-accuracy floors it has to beat:")
+    print(f"    always predict win {max(base, 1 - base):7.1%}   "
+          f"(labels are {base:.1%} wins)")
+    print(f"    HP differential    {hp_acc:7.1%}   "
+          f"({edge.mean():.0%} of rows have an HP edge)")
+    print(f"    value head         {sign_acc:7.1%}   "
+          f"({sign_acc - max(base, 1 - base, hp_acc):+.1%} vs best floor)")
 
     edges = np.linspace(0, 1, 11)
     ece = 0.0
-    print("\n  calibration (predicted win% vs actual):")
+    print(f"\n  calibration (predicted win% vs actual):")
     print(f"    {'bin':>12s} {'n':>7s} {'predicted':>10s} {'actual':>8s} "
           f"{'gap':>7s}")
     for lo, hi in zip(edges[:-1], edges[1:]):
@@ -306,11 +304,11 @@ def value_report(values, ds, tok, cfg):
         print(f"    {lo:.1f}-{hi:.1f}".ljust(17)
               + f"{int(in_bin.sum()):7d} {pred:10.1%} {actual:8.1%} "
                 f"{actual - pred:+7.1%}")
-    print(f"  ECE {ece:.3f}")
+    print(f"    ECE {ece:.3f}")
 
     turn = _token_lookup(tok, "TURN_", cast=int)
     buckets = turn[ds.tokens[:, 1]]
-    print("\n  by game phase (a value head should start unsure and end sure):")
+    print(f"\n  by game phase:")
     print(f"    {'turn bucket':>12s} {'n':>7s} {'sign acc':>9s} {'MSE':>7s} "
           f"{'mean |v|':>9s}")
     for b in sorted(set(buckets[~np.isnan(buckets)])):
@@ -318,6 +316,8 @@ def value_report(values, ds, tok, cfg):
         print(f"    {int(b):>12d} {int(m.sum()):7d} "
               f"{np.mean(np.sign(v[m]) == np.sign(z[m])):9.1%} "
               f"{np.mean((v[m] - z[m]) ** 2):7.3f} {np.mean(np.abs(v[m])):9.3f}")
+    print("  (healthy shape: near-chance and diffident early, accurate and "
+          "confident late; MSE floor 1.000 = predicting 0 everywhere)")
 
 
 def aux_report(model, ds, cfg):
