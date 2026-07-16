@@ -313,13 +313,17 @@ HELP = {
           -h, --help         Show this help message and exit.
     """,
     "teams.py": """
-        List, display, validate, or mine teams used by human and bot play.
+        List, display, validate, or mine teams used by human and bot play,
+        and build the self-play team pool.
 
         Usage:
           python teams.py --list
           python teams.py --show NAME
           python teams.py --validate
           python teams.py --mine [N]
+          python teams.py --build-pool [N]
+          python teams.py --import-pool FILE
+          python teams.py --pool
 
         Options:
           --list             List replica team names and archetypes.
@@ -327,6 +331,14 @@ HELP = {
           --validate         Validate every replica team with the simulator.
           --mine [N]         Print the N most common high-rated dataset teams
                              (default: 10).
+          --build-pool [N]   Mine N real Reg M-B teams (default: 30), fill
+                             redacted stat points from the Pikalytics prior,
+                             validate, write artifacts/selfplay_teams.json.
+                             selfplay.py + profile_selfplay.py sample the
+                             pool automatically once it exists.
+          --import-pool FILE Add teams from a Showdown export/backup dump
+                             (any teams database exports this) to the pool.
+          --pool             List the current self-play pool.
           -h, --help         Show this help message and exit.
     """,
     "train.py": """

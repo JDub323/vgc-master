@@ -233,8 +233,10 @@ def generate_games(model, tok, cfg, n_games, workers, seed, verbose=True):
     BatchedEvaluator. Returns a dict of stacked sample arrays."""
     evaluator = BatchedEvaluator(model)
     usage = json.loads((cfg.artifacts_dir / "usage_stats.json").read_text())
-    team_names = list(teams_mod.TEAMS)
-    team_sets = {t: teams_mod.get(t) for t in team_names}
+    # replicas + the mined pool (teams.py --build-pool): more distinct teams
+    # so the net can't memorize the fixed replica pool's pairwise artifacts
+    team_sets = teams_mod.selfplay_pool(cfg)
+    team_names = list(team_sets)
     noise = (cfg.sp_dirichlet_eps, cfg.sp_dirichlet_alpha)
     jobs = list(range(n_games))
     lock = threading.Lock()
@@ -427,8 +429,8 @@ def gate(model_new, model_old, tok, cfg, n_games, workers=4):
     benchmark.py series against an archived bundle."""
     from benchmark import run_game
     usage = json.loads((cfg.artifacts_dir / "usage_stats.json").read_text())
-    team_names = list(teams_mod.TEAMS)
-    team_sets = {t: teams_mod.get(t) for t in team_names}
+    team_sets = teams_mod.selfplay_pool(cfg)   # same pool generation uses
+    team_names = list(team_sets)
     jobs = list(range(n_games))
     lock, score = threading.Lock(), [0.0]
 

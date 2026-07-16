@@ -240,6 +240,13 @@ per-slot checkpoints, and checkpoint-only benchmark bundles are unsupported.
 python benchmark.py list                  # includes the frozen `baseline`
 python benchmark.py list
 
+# 0.5 widen the self-play team distribution (optional, recommended): mine
+#     real high-rated Reg M-B teams so the net can't memorize the 10-replica
+#     pool's pairwise artifacts. Stat points are redacted on sheets; they are
+#     filled from the Pikalytics objective prior and sim-validated.
+python teams.py --build-pool 30      # -> artifacts/selfplay_teams.json
+python teams.py --pool               # inspect; --import-pool FILE adds more
+
 # 1. self-play (the main event): fork the BC net, generate -> train -> gate
 python selfplay.py --hours 10        # overnight; resumable, checkpoints each iter
 python selfplay.py --iters 3         # or a fixed number of iterations
@@ -695,7 +702,7 @@ their bundles compose here.
 | [scenarios.py](scenarios.py) | Endgame gates (mixed-strategy assertion) + earlygame/midgame model diagnostics (switch-outs, weather wars, Contrary boost lines) + real-replay endgame mining. Exists so search regressions fail loudly instead of costing Elo silently. |
 | [observe_game.py](observe_game.py) | Step-through self-play viewer of beliefs/predictions/strategy/value. Exists because a bot you can't watch thinking can't be debugged. |
 | [replays.py](replays.py) | Terminal search over saved replays + local server that opens them in the Showdown replay player (VS Code port-forward friendly). Exists because hundreds of saved games are useless if you can't find the one you need. |
-| [teams.py](teams.py) | 10 replica Reg M-B teams (real tournament archetypes) + export parser + sim-validator + dataset team miner. Exists so human games start from realistic, legal, varied matchups. |
+| [teams.py](teams.py) | 10 replica Reg M-B teams (real tournament archetypes) + export parser + sim-validator + dataset team miner + the mined/imported self-play team pool (`--build-pool`). Exists so human games start from realistic, legal, varied matchups — and so self-play sees enough distinct teams not to memorize pool artifacts. |
 | [play.py](play.py) | Human-vs-bot orchestration: local server spawn, chooser menu, live "bot thoughts" dashboard. Exists so a human can actually fight — and read — the bot without any custom battle GUI. |
 | [tests/test_agents.py](tests/test_agents.py), [tests/test_documentation.py](tests/test_documentation.py), [tests/conftest.py](tests/conftest.py) | Modular/archive contracts, documentation coverage/alignment gates, and pytest fixtures for real Showdown/calc integration tests. |
 | [colab.ipynb](colab.ipynb) | End-to-end pipeline on any Jupyter GPU box (remote A100/L4, Colab Pro) — rootless Node bootstrap, skip-if-present data download. Exists so the whole pipeline runs on rented strong compute. |

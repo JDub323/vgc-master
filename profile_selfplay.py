@@ -165,8 +165,8 @@ def main():
 
     stats = {"belief_s": 0.0, "move_walls": [], "health": Counter(),
              "decisions": 0, "solve_moves": 0}
-    team_names = list(teams_mod.TEAMS)
-    team_sets = {t: teams_mod.get(t) for t in team_names}
+    team_sets = teams_mod.selfplay_pool(cfg)   # what generation really plays
+    team_names = list(team_sets)
 
     print(f"device {device} | model {desc}")
     print(f"games {n_games} | sims/move {cfg.sims_per_move} | "
