@@ -721,15 +721,21 @@ The code is laptop-debuggable but sized for a big box; the knobs that matter:
 
 ## JEPA world-model experiment (exp/jepa-world-model, pile-only)
 
-A self-contained experiment agent that replaces determinized tree search with a
-**learned latent world model plus a matrix-game solve**. It encodes the live
-position into per-entity latents, predicts the next-state latent of every
-candidate joint-action pair `(mine, opponent)`, reads a win-probability payoff
-off each predicted latent, averages that payoff matrix over belief
-determinizations, and solves the matrix for a mixed strategy. Full design and
-honest limits are in `JEPA_DESIGN.md`; the durable numbers land in
-`EXPERIMENTS.md`. It touches none of the ten hashed behavior files; the only
-edit outside its own tree is one additive kind in `agent_server.build_chooser`.
+Two variants; full design and honest limits in `JEPA_DESIGN.md`, durable numbers
+in `EXPERIMENTS.md`. Both touch none of the ten hashed behavior files; the only
+edits outside the experiment's own tree are two additive kinds in
+`agent_server.build_chooser`.
+
+- **Consequence variant (kind `jepa-c`, the intended architecture).** For each
+  legal OWN joint move it predicts a single latent **consequence vector** that
+  already integrates the opponent's response and chance — never decoded to an
+  explicit state, no opponent axis, no matrix. Trained JEPA-style: the taken
+  move's consequence vector is matched to an EMA target-encoder's embedding of
+  the realized future position; a policy head ranks the candidate consequence
+  vectors (behavior cloning) and a value head reads win probability off them.
+- **Next-state variant (kind `jepa`).** Predicts next-state latents for every
+  `(mine, opponent)` joint pair and solves that payoff matrix into a mixed
+  strategy. Kept and runnable, but not the consequence formulation.
 
 New modules (none imported by the frozen trunk agents):
 
@@ -737,23 +743,27 @@ New modules (none imported by the frozen trunk agents):
 |---|---|
 | `jepa/config.py` | Experiment-local `JEPAConfig` (model/train/planner knobs), kept out of the hashed `config.py`. |
 | `jepa/vocab.py` | Stable id maps + dex lookups (base stats, types, move meta, mega stones) built from `dex.json` + `vocab.json`. |
-| `jepa/features.py` | CTS view + belief -> the fixed 16-entity feature layout (1 global + 6 ally + 6 foe + 2 opponent-intent + CLS) and per-token action arrays. |
-| `models/jepa_wm.py` | `JEPAWorldModel`: role-typed transformer encoder, action-conditioned predictor, value/grounded/policy heads, and an EMA target encoder. |
-| `jepa/solver.py` | Regret-matching solver turning a latent payoff matrix into a mixed strategy. |
-| `agents/jepa_world_model/v1.py` | `JEPAWorldModelChooser` (the `MoveChooser`) and its builder; runs the one-ply latent plan and matrix solve. |
-| `jepa_data.py` | Builds paired-transition shards `(s_t, a, b) -> s_{t+1}` into `artifacts/jepa_prepped` (never touches the layout-3 shards). |
-| `train_jepa.py` | Trains the world model (JEPA latent loss + value + grounded decoders + policy heads + VICReg, EMA target). |
+| `jepa/features.py` | CTS view + belief -> the fixed 16-entity feature layout (1 global + 6 ally + 6 foe + 2 opponent-intent + CLS), per-token action arrays, and own legal-joint enumeration. |
+| `jepa/solver.py` | Regret-matching solver turning a latent payoff matrix into a mixed strategy (next-state variant). |
+| `models/jepa_consequence.py` | `JEPAConsequenceModel`: role-typed encoder, own-move consequence predictor (opponent+luck integrated), policy/value heads, EMA target — the consequence variant. |
+| `models/jepa_wm.py` | `JEPAWorldModel`: role-typed encoder, action-conditioned next-state predictor, value/grounded/policy heads, EMA target — the next-state variant. |
+| `agents/jepa_world_model/v2.py` | `JEPAConsequenceChooser` (`MoveChooser`) + builder: ranks predicted consequence vectors. |
+| `agents/jepa_world_model/v1.py` | `JEPAWorldModelChooser` (`MoveChooser`) + builder: one-ply latent plan + matrix solve. |
+| `jepa_data.py` | Builds transition shards into `artifacts/jepa_prepped` (next-state) or, with `--consequence`, own-move candidate/future shards into `artifacts/jepa_cons_prepped`. Never touches the layout-3 shards. |
+| `train_consequence.py` | Trains the consequence model (JEPA latent loss + policy BC + value + VICReg, EMA target). |
+| `train_jepa.py` | Trains the next-state world model (JEPA latent + value + grounded decoders + policy heads + VICReg, EMA target). |
 
-Run:
+Run the consequence variant (the intended one):
 
 ```bash
-python tests/test_jepa.py                       # architecture smoke/contract tests
-python jepa_data.py --limit 200                 # tiny transition shards (add --damage for edges)
-python train_jepa.py --data artifacts/jepa_prepped --epochs 6
-python export_agent.py exp-jepa-wm --agent jepa \
-    --ckpt artifacts/checkpoints/jepa/jepa_wm.pt --architecture JEPA-WorldModel-MatrixSolve
-python round_robin.py play exp-jepa-wm rr-baseline --quick 10
+python tests/test_jepa.py                                   # architecture tests
+python jepa_data.py --consequence --limit 200               # tiny own-move/future shards
+python train_consequence.py --data artifacts/jepa_cons_prepped --epochs 6
+python export_agent.py exp-jepa-c --agent jepa-c \
+    --ckpt artifacts/checkpoints/jepa/jepa_consequence.pt --architecture JEPA-Consequence
+python round_robin.py play exp-jepa-c rr-baseline --quick 10
 ```
 
-Without a checkpoint the agent still runs (a random-init net that plays legally
-but weakly), so the bundle is always exportable.
+The next-state variant is the same flow with `jepa_data.py` (no `--consequence`),
+`train_jepa.py`, and `--agent jepa`. Without a checkpoint either agent still runs
+(random-init, legal but weak), so a bundle is always exportable.

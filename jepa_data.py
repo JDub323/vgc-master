@@ -12,7 +12,10 @@ indices resolve to the right move identities.
 Writes to a NEW directory (default ``artifacts/jepa_prepped``); it never touches
 the layout-3 shards under ``artifacts/prepped``.
 
-CLI: python jepa_data.py [--out DIR] [--limit N] [--damage]
+The default (world-model) payload feeds ``train_jepa.py``; ``--consequence``
+emits the own-move candidate/future payload that feeds ``train_consequence.py``.
+
+CLI: python jepa_data.py [--out DIR] [--limit N] [--damage] [--consequence]
 """
 
 import sys
@@ -21,10 +24,12 @@ from pathlib import Path
 
 import numpy as np
 
+from actions import from_index
 from config import CFG
 from data import battle_weight, iter_battles, sid
 from jepa.config import JCFG
-from jepa.features import action_arrays
+from jepa.features import (PASS_JOINT, action_arrays, legal_my_joints,
+                           my_action_arrays)
 from jepa.vocab import JEPAVocab
 
 
@@ -34,8 +39,12 @@ def _parsed_files(cfg):
             for fn in cfg.dataset_files]
 
 
-def prep(out_dir, limit=None, use_damage=False, cfg=CFG, jcfg=JCFG):
-    """Generate transition shards; return the total transition count written."""
+def prep(out_dir, limit=None, use_damage=False, mode="wm", cfg=CFG, jcfg=JCFG):
+    """Generate transition shards; return the total transition count written.
+
+    ``mode='wm'`` emits the v1 world-model payload (joint (a,b) + next state);
+    ``mode='consequence'`` emits the v2 payload (own-move candidate sets + the
+    future position that the consequence vector is trained to predict)."""
     import json
 
     from beliefs import OpponentBelief
@@ -101,7 +110,7 @@ def prep(out_dir, limit=None, use_damage=False, cfg=CFG, jcfg=JCFG):
                       for s in rec["teams"][opp]]
             for sample in _battle_steps(rec, p, opp, belief, extractor, vocab,
                                         opp_ms, outcome, w, bridge if use_damage
-                                        else None):
+                                        else None, mode, jcfg.n_cand):
                 add(split, sample)
                 total += 1
             for s in shard_by_split:
@@ -117,7 +126,7 @@ def prep(out_dir, limit=None, use_damage=False, cfg=CFG, jcfg=JCFG):
 
 
 def _battle_steps(rec, p, opp, belief, extractor, vocab, opp_ms, outcome, w,
-                  bridge):
+                  bridge, mode="wm", n_cand=12):
     """Yield one transition dict per consecutive labelled turn pair."""
     from damage import damage_features
     steps = []
@@ -128,32 +137,60 @@ def _battle_steps(rec, p, opp, belief, extractor, vocab, opp_ms, outcome, w,
             dmg = damage_features(state, belief, bridge) if bridge else None
             pos = extractor.extract(state, summ, opp_movesets=opp_ms, dmg=dmg)
             acts = turn["actions"]
-            steps.append((pos, acts[p] if acts else None,
+            steps.append((pos, state, acts[p] if acts else None,
                           acts[opp] if acts else None))
         belief.update(turn["events"], viewer=p)
     for i in range(len(steps) - 1):
-        pos, a, b = steps[i]
-        if a is None or b is None:
-            continue
+        pos, state, a, b = steps[i]
         nxt = steps[i + 1][0]
-        act = action_arrays(pos, a, b, vocab)
-        yield {
-            "cur_gcat": pos.global_cat.astype(np.int16),
-            "cur_gscal": pos.global_scalar,
-            "cur_mcat": pos.mon_cat.astype(np.int16),
-            "cur_mscal": pos.mon_scalar,
-            "cur_dmg": pos.dmg_edge,
-            "act": act.astype(np.int16),
-            "nxt_gcat": nxt.global_cat.astype(np.int16),
-            "nxt_gscal": nxt.global_scalar,
-            "nxt_mcat": nxt.mon_cat.astype(np.int16),
-            "nxt_mscal": nxt.mon_scalar,
-            "nxt_dmg": nxt.dmg_edge,
-            "value": np.int8(outcome),
-            "weight": np.float32(w),
+        if mode == "consequence":
+            if a is None:                      # only my action is required here
+                continue
+            yield _consequence_sample(pos, state, nxt, a, outcome, w, vocab, n_cand)
+        else:
+            if a is None or b is None:
+                continue
+            yield _wm_sample(pos, nxt, a, b, outcome, w, vocab)
+
+
+def _cur_nxt(pos, nxt, outcome, w):
+    """Shared cur/next/value/weight arrays for either shard mode."""
+    return {
+        "cur_gcat": pos.global_cat.astype(np.int16), "cur_gscal": pos.global_scalar,
+        "cur_mcat": pos.mon_cat.astype(np.int16), "cur_mscal": pos.mon_scalar,
+        "cur_dmg": pos.dmg_edge,
+        "nxt_gcat": nxt.global_cat.astype(np.int16), "nxt_gscal": nxt.global_scalar,
+        "nxt_mcat": nxt.mon_cat.astype(np.int16), "nxt_mscal": nxt.mon_scalar,
+        "nxt_dmg": nxt.dmg_edge,
+        "value": np.int8(outcome), "weight": np.float32(w)}
+
+
+def _wm_sample(pos, nxt, a, b, outcome, w, vocab):
+    """One world-model (v1) transition: joint (a,b) + explicit next state."""
+    return {**_cur_nxt(pos, nxt, outcome, w),
+            "act": action_arrays(pos, a, b, vocab).astype(np.int16),
             "a_slot": np.array(a, dtype=np.int16),
-            "b_slot": np.array(b, dtype=np.int16),
-        }
+            "b_slot": np.array(b, dtype=np.int16)}
+
+
+def _consequence_sample(pos, state, nxt, a, outcome, w, vocab, n_cand):
+    """One consequence (v2) sample: own-move candidate set + future target.
+
+    The taken action is placed at candidate index 0; the rest are other legal
+    own joints, so the policy head learns to rank the human's move above them and
+    the JEPA loss matches candidate 0's consequence to the future ``nxt``."""
+    a_true = (from_index(int(a[0])), from_index(int(a[1])))
+    cands = [a_true] + [c for c in legal_my_joints(state, 64) if c != a_true]
+    cands = cands[:n_cand]
+    cand_acts = np.zeros((n_cand, 12, 7), dtype=np.int16)
+    cand_mask = np.zeros(n_cand, dtype=bool)
+    for j, cd in enumerate(cands):
+        cand_acts[j] = action_arrays(pos, cd, PASS_JOINT, vocab)
+        cand_mask[j] = True
+    return {**_cur_nxt(pos, nxt, outcome, w),
+            "my_act": my_action_arrays(pos, a_true, vocab).astype(np.int16),
+            "cand_acts": cand_acts, "cand_mask": cand_mask,
+            "a_index": np.int16(0)}
 
 
 def main():
@@ -164,9 +201,13 @@ def main():
         """Return the token after ``flag`` in argv, else ``default``."""
         return args[args.index(flag) + 1] if flag in args else default
 
-    out = opt("--out", str(CFG.artifacts_dir / "jepa_prepped"))
+    mode = "consequence" if "--consequence" in args else "wm"
+    default_out = ("jepa_cons_prepped" if mode == "consequence"
+                   else "jepa_prepped")
+    out = opt("--out", str(CFG.artifacts_dir / default_out))
     limit = opt("--limit")
-    prep(out, limit=int(limit) if limit else None, use_damage="--damage" in args)
+    prep(out, limit=int(limit) if limit else None,
+         use_damage="--damage" in args, mode=mode)
 
 
 if __name__ == "__main__":

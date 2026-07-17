@@ -1,5 +1,90 @@
 # JEPA world model for VGC doubles — design
 
+> **Two variants live in this worktree.** The **Consequence variant (v2, kind
+> `jepa-c`)** — described in the next section — is the intended architecture: a
+> pure latent move-consequence predictor with a policy head, no explicit-state
+> decoding and no opponent/matrix axis. The **next-state variant (v1, kind
+> `jepa`)**, described afterwards, predicts next-state latents and solves an
+> `(a,b)` payoff matrix; it is kept because it is already built and runnable, but
+> it is *not* the consequence formulation.
+
+---
+
+## Consequence variant (v2) — the intended architecture
+
+**Goal.** For the current position and *each legal own joint move*, predict a
+single **latent consequence vector** that summarizes the distribution over what
+happens *after the opponent responds and chance resolves*. It is never decoded
+to an explicit board state; it only has to be sufficient to compare moves. By
+being trained to predict these consequence embeddings, the model is forced to
+implicitly learn the engine, opponent behavior, and stochastic effects — JEPA
+without reconstructing observations.
+
+```
+  encode s_t ─────────────► z         (context latents; role-typed transformer)
+  for each legal own move a:
+     ĉ_a = Predictor(z, a, ξ)         (one latent consequence vector; ξ = luck)
+                                        opponent + chance integrated INSIDE ĉ_a
+  policy head ranks {ĉ_a} ──────────► play argmax (temperature-sampled)
+  value head V(ĉ_a) ────────────────► desirability (predicted win prob)
+```
+
+**Predictor.** Input = context latents `z` + the OWN move `a` (opponent action
+is *not* an input) + an optional luck latent `ξ`. Output = one vector `ĉ_a ∈
+R^d`. The opponent's response distribution and chance are compressed inside
+`ĉ_a`; there is no opponent-action axis and no matrix game.
+
+**Target = the future, in latent space.** An EMA **target encoder** `g` (a slow
+copy of the online encoder `f`) embeds the realized position `horizon` plies
+later: `sg(g(s_{t+h}))`. The predictor for the move actually taken is trained to
+match it: `L = ‖Predictor(f(s_t), a_t, ξ) − sg(g(s_{t+h}))‖`. Because the same
+`(s, a)` maps to many different futures across the data (and across simulated
+what-ifs), the minimizer of that loss is the **expected** future embedding — the
+consequence-distribution summary. No handcrafted value, no next-state
+reconstruction, no decoder to explicit HP/status.
+
+**Policy head (the flagged challenge).** A small shared MLP scores each
+candidate move's consequence vector into a logit; softmax over the legal moves.
+It is trained by **behavior cloning** on strong-human choices (cross-entropy
+toward the move actually played), which forces the consequence vectors to be
+*sufficient for comparing moves*. A **value head** reads win probability off the
+taken move's consequence vector (real game outcome — not handcrafted); at play
+it labels each move's expected win. Desirability = policy score (value shown
+alongside). Everything reads only the consequence vector.
+
+**Encoded luck (`ξ`).** The predictor accepts a luck latent so the consequence
+vector can represent the *spread*, not just the mean, and so decisions can
+average over an ensemble of luck draws. Default `noise_dim=0` (deterministic:
+the vector is the distribution's mean, which is what the heads need); a
+stochastic CVAE-style latent that samples the consequence distribution is the
+documented lever (`noise_dim>0`, plus a posterior network).
+
+**Training data — real now, simulated "what-ifs" as the extension.** The
+implemented path uses recorded human continuations (`jepa_data.py
+--consequence`): one realized future per `(s, a_t)`, plus the full legal
+candidate set at `s_t` for the policy head. The intended stronger path (designed,
+**not yet implemented**) uses the env sidecar to *replay a position and simulate
+different opponent moves and chance seeds*, giving many futures per `(s, a)` for
+every legal `a` and teaching the consequence distribution directly — it needs the
+Node sim, which is not installed on the dev laptop.
+
+**Anti-collapse.** EMA target + stop-grad asymmetry, VICReg
+(variance+covariance) on the encoder latents, and the value/policy heads reading
+the same latents. No grounded-decoder crutch.
+
+**Decision loop.** Encode once; predict `ĉ_a` for every legal own move
+(cheaply, in one batched predictor call); score; play argmax (or
+temperature-sample). Scores/values are averaged over a couple of belief
+determinizations (near-free, since nothing is simulated) and, when `ξ` is on,
+over a small luck ensemble. Reuses the role-typed encoder, feature layout, and
+vocab below.
+
+---
+
+## Next-state variant (v1) — kept, but not the consequence formulation
+
+# JEPA world model for VGC doubles — design (v1 notes)
+
 **Lane: pile-only.** This is a structural rewrite — new tokenizer/feature layout,
 new action-selection algorithm, no reuse of the layout-3 tokenizer or the
 policy/value transformer. It composes with everyone else through the round-robin

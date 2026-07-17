@@ -56,5 +56,26 @@ class JEPAConfig:
     use_damage_features: bool = True   # ally->foe damage edges (needs bridge)
     play_temperature: float = 1.0
 
+    # ---- consequence variant (v2: pure latent move-consequence embedding) ----
+    # A JEPA model that predicts, per legal MY move, a single latent
+    # "consequence" vector that already integrates the opponent's response and
+    # chance (no explicit next state, no (a,b) matrix). A policy head ranks
+    # those vectors. See JEPA_DESIGN.md "Consequence variant".
+    horizon: int = 1                   # plies ahead the target future encodes
+    n_cpred_layers: int = 2            # consequence-predictor transformer depth
+    n_cand: int = 12                   # BC candidate cap per position
+    # encoded-luck latent: wired as a predictor input (jepa/features + the
+    # ConsequencePredictor accept it). Default 0 = deterministic, so the
+    # consequence vector IS the distribution summary (its mean), which is what
+    # the value/policy heads need. A stochastic (CVAE-style) latent that samples
+    # the consequence distribution is the documented lever: set noise_dim>0.
+    noise_dim: int = 0                 # encoded-luck latent width (0 = deterministic)
+    ensemble_m: int = 4                # decision-time luck samples averaged (noise_dim>0)
+    cons_determinizations: int = 2     # belief samples averaged at play time
+    w_jepa_c: float = 1.0              # consequence-latent prediction loss
+    w_bc: float = 1.0                  # policy-head behavior-cloning loss
+    w_value_c: float = 0.5             # outcome value off the consequence vector
+    w_spread: float = 0.05             # luck-latent usage (spread) regularizer
+
 
 JCFG = JEPAConfig()

@@ -52,6 +52,45 @@ experiment's own new files is one additive `if kind == "jepa"` branch in
 `JEPA-WorldModel-MatrixSolve`; agent kind `jepa`; chooser
 `agents.jepa_world_model.v1.JEPAWorldModelChooser`.
 
+This experiment has **two variants**. The **consequence variant (`jepa-c`)** is
+the intended architecture; the **next-state variant (`jepa`)** was the first cut
+and is kept because it is built and runnable.
+
+### Consequence variant (`jepa-c`) — the intended architecture
+
+**What it is.** For the current position and each legal OWN joint move, a
+predictor outputs a single latent **consequence vector** that summarizes the
+distribution over what happens after the opponent responds and chance resolves —
+never decoded to an explicit state, no opponent-action axis, no matrix game. It
+is trained JEPA-style: the taken move's consequence vector is matched (smooth-L1)
+to an EMA target-encoder's embedding of the realized future position, so — since
+one (position, move) maps to many futures — it learns the *expected* future
+embedding and thereby the engine/opponent/luck dynamics implicitly. A policy
+head ranks the candidate consequence vectors (behavior cloning on the human
+move), a value head reads win probability off them (real outcome), and VICReg +
+the EMA stop-grad prevent collapse. An optional luck latent `xi` lets the vector
+represent the spread (default deterministic). Shares the role-typed encoder,
+feature layout, and vocab with the next-state variant. Files:
+`models/jepa_consequence.py`, `agents/jepa_world_model/v2.py`,
+`train_consequence.py`, plus `jepa_data.py --consequence`.
+
+**What moved (laptop pipeline validation only).** 150-battle consequence prep →
+1,383 train / 120 val / 87 test transitions (each carries the future position
+and up to 12 legal own-move candidates), 5 CPU epochs. The **JEPA latent loss
+fell 0.571 → 0.129** (the predictor is genuinely learning to predict future
+consequence embeddings), value MSE held ~1.0 (≈predicting 0 on this tiny set),
+and the **policy head's validation top-1 rose 0.508 → 0.575**. The trained
+checkpoint round-trips into the `jepa-c` chooser, which ranks ~60 candidate moves
+by predicted consequence and returns a legal action with valid `ChoiceInfo`.
+These certify the machinery, **not strength** — not comparable to the frozen
+splits or to Elo, and no search/Elo evaluation has been run. (The larger
+train/val policy-accuracy gap is dropout plus variable candidate counts on a
+tiny set.) A simulated-counterfactual target path (replay a position, step the
+env sidecar with different opponent moves/seeds to get many futures per move)
+is **designed but not implemented** — it needs the Node sim, absent here.
+
+### Next-state variant (`jepa`)
+
 **What it is.** A learned latent one-ply world model replaces determinized DUCT
 tree search. Per decision it encodes the position into 16 role-typed entity
 latents (1 global + 6 ally + 6 foe + 2 opponent-intent + CLS) with a

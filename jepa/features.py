@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from actions import (N_MOVES, T_ALLY, T_AUTO, T_FOE_A, T_FOE_B, SlotAction,
-                     from_index)
+                     from_index, joint_ok)
 from beliefs import calc_stat
 from data import sid
 
@@ -236,6 +236,47 @@ def action_arrays(pos, my_joint, opp_joint, vocab):
     _fill_side(arr, 0, pos.my_active, pos.my_movesets, my_joint, vocab)
     _fill_side(arr, N_MON, pos.opp_active, pos.opp_movesets, opp_joint, vocab)
     return arr
+
+
+def legal_my_joints(view, max_cand=64):
+    """Enumerate plausible own joint actions from a view (no sim request).
+
+    Approximate doubles legality from public state: each active own mon's move
+    slots x foe/spread targets, plus switches to live bench mons. Used to build
+    behavior-cloning candidate sets during prep and, at play time, as a fallback
+    when the real request's legal set is unavailable. PP/disable are unknown
+    from a view, so this is a superset the policy head learns to rank."""
+    team = view["my"]["team"]
+    active = {m["active_slot"]: m for m in team
+              if m["active_slot"] is not None and not m["fainted"]}
+    bench = [m["team_idx"] for m in team
+             if m["active_slot"] is None and not m["fainted"]]
+
+    def slot_acts(m):
+        """Own slot actions for one (possibly empty) active mon."""
+        if m is None:
+            return [SlotAction("pass")]
+        acts = []
+        for j in range(min(N_MOVES, len(m["set"]["moves"]))):
+            for tgt in (T_FOE_A, T_FOE_B, T_AUTO):
+                acts.append(SlotAction("move", move_slot=j, target=tgt))
+        acts += [SlotAction("switch", switch_to=k) for k in bench]
+        return acts or [SlotAction("pass")]
+
+    s0, s1 = slot_acts(active.get(0)), slot_acts(active.get(1))
+    joints = [(a, b) for a in s0 for b in s1 if joint_ok(a, b)]
+    return joints[:max_cand]
+
+
+PASS_JOINT = (SlotAction("pass"), SlotAction("pass"))
+
+
+def my_action_arrays(pos, my_joint, vocab):
+    """Action arrays with only the own side filled (opponent tokens = no-op).
+
+    The consequence model conditions on MY move alone; the opponent's response
+    is integrated into the predicted consequence, never given as an input."""
+    return action_arrays(pos, my_joint, PASS_JOINT, vocab)
 
 
 def _fill_side(arr, base, active, movesets, joint, vocab):

@@ -236,9 +236,90 @@ def _batch(positions, model):
             "dmg": t([p.dmg_edge for p in positions], torch.float32)}
 
 
+def test_legal_my_joints_from_view():
+    """Own legal-joint enumeration from a view yields move+switch joints."""
+    from jepa.features import legal_my_joints
+    vocab = _vocab()
+    _, _, _, view = _mock_battle(vocab)
+    joints = legal_my_joints(view, 64)
+    assert joints and all(len(j) == 2 for j in joints)
+    kinds = {a.kind for j in joints for a in j}
+    assert "move" in kinds
+
+
+def test_consequence_model_forward():
+    """Consequence predictor + policy/value heads return correct shapes."""
+    from models.jepa_consequence import JEPAConsequenceModel
+    from jepa.features import my_action_arrays
+    vocab = _vocab()
+    model = JEPAConsequenceModel(vocab.sizes(), JCFG, vocab.state())
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    b = _batch([pos], model)
+    z = model.encode(b)
+    act = torch.as_tensor(my_action_arrays(pos, (1, 1), vocab))[None]
+    c = model.consequence(z, act, b["dmg"], None)
+    assert c.shape == (1, JCFG.d_model)
+    assert model.score(c).shape == (1,) and model.value(c).shape == (1,)
+
+
+def test_consequence_chooser_end_to_end():
+    """A random-init consequence chooser returns a legal move + ChoiceInfo."""
+    from agents.jepa_world_model.v2 import JEPAConsequenceChooser
+    from models.jepa_consequence import JEPAConsequenceModel
+    vocab = _vocab()
+    model = JEPAConsequenceModel(vocab.sizes(), JCFG, vocab.state())
+    chooser = JEPAConsequenceChooser(model, vocab, CFG, JCFG, seed=0, bridge=None)
+    tracker, belief, request, _ = _mock_battle(vocab)
+    joint, info = chooser.choose(tracker, belief, "p1", request, [0, 1, 2, 3],
+                                 temperature=0.0)
+    assert isinstance(joint, tuple) and joint[0].kind in ("move", "switch", "pass")
+    assert info["strategy"] and info["strategy"][0][0] != "fallback:first-legal"
+    assert info["health"].get("determinizations") == JCFG.cons_determinizations
+    from actions import joint_choice
+    assert joint_choice(request, joint, {f"Mon{k}": k for k in range(6)})
+
+
+def test_consequence_training_step():
+    """One synthetic consequence minibatch backpropagates through every loss."""
+    from train_consequence import losses
+    from models.jepa_consequence import JEPAConsequenceModel
+    vocab = _vocab()
+    model = JEPAConsequenceModel(vocab.sizes(), JCFG, vocab.state())
+    sizes = vocab.sizes()
+    b, nc = 8, 6
+    rng = np.random.default_rng(0)
+
+    def pos(pref):
+        return {pref + "gcat": torch.stack([
+                    torch.as_tensor(rng.integers(0, len(WEATHERS), b)),
+                    torch.as_tensor(rng.integers(0, len(TERRAINS), b))], 1),
+                pref + "gscal": torch.rand(b, 18),
+                pref + "mcat": torch.stack([torch.as_tensor(
+                    rng.integers(0, min(sizes["species"], 12), (b, 12)))
+                    for _ in range(10)], -1),
+                pref + "mscal": torch.rand(b, 12, N_MON_SCALAR),
+                pref + "dmg": torch.rand(b, 6, 6)}
+    sh = {**pos("cur_"), **pos("nxt_"),
+          "value": torch.as_tensor((rng.integers(0, 2, b) * 2 - 1).astype("float32")),
+          "weight": torch.ones(b),
+          "my_act": torch.as_tensor(rng.integers(0, 3, (b, 12, 7))),
+          "cand_acts": torch.as_tensor(rng.integers(0, 3, (b, nc, 12, 7))),
+          "cand_mask": torch.ones(b, nc, dtype=torch.bool),
+          "a_index": torch.zeros(b, dtype=torch.long)}
+    for pref in ("cur_", "nxt_"):
+        sh[pref + "mcat"][..., 7] = torch.as_tensor(
+            rng.integers(0, len(STATUSES), (b, 12)))
+    loss, metrics = losses(model, sh, JCFG)
+    loss.backward()
+    assert torch.isfinite(loss) and metrics["total"] > 0
+
+
 TESTS = [test_features_and_actions, test_model_forward,
          test_solver_finds_mixed_strategy, test_chooser_end_to_end,
-         test_training_step_runs]
+         test_training_step_runs, test_legal_my_joints_from_view,
+         test_consequence_model_forward, test_consequence_chooser_end_to_end,
+         test_consequence_training_step]
 
 
 if __name__ == "__main__":
