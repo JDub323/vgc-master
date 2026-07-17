@@ -673,6 +673,42 @@ graph connected at N series instead of N(N−1)/2; save `all` for finalists.
 See `EXPERIMENT_BRIEF.md` for the rules experiment branches must follow so
 their bundles compose here.
 
+### Experiment branch: team preview + forced switch-ins (exp/lead-switch)
+
+The stock adapter answers team preview with `team 1234` and forced switches
+(faints, Roar, U-turn/pivots) with a random legal pick — the two decisions
+the frozen chooser never sees. This branch measures how much Elo those two
+blind spots cost, **without touching the base model or any shared behavior
+file**. [lead_switch_server.py](lead_switch_server.py) subclasses the stock
+adapter and routes exactly those two request kinds through pluggable
+selectors under [agents/lead_switch/](agents/lead_switch/):
+
+- [agents/lead_switch/matchup.py](agents/lead_switch/matchup.py) — belief-aware
+  pairwise damage/speed tables from the `@smogon/calc` bridge (type-chart
+  fallback without one); the primitive every selector shares.
+- [agents/lead_switch/expert.py](agents/lead_switch/expert.py) — hard-coded
+  selectors: preview scored over all 90 bring/lead combos against a
+  softmax-weighted model of the opponent's 15 lead pairs plus a bring-4
+  coverage term; forced switches use the classic trainer-AI recipe (best
+  damage out, danger-weighted damage in, speed tiebreak).
+- [agents/lead_switch/value.py](agents/lead_switch/value.py) — the FROZEN
+  baseline net's value head evaluates hypothetical post-decision positions
+  (tokenized exactly as in training); preview becomes an expert-pruned
+  payoff matrix scored with an opponent-model/maximin blend.
+- [agents/lead_switch/leadnet.py](agents/lead_switch/leadnet.py) +
+  [train_leads.py](train_leads.py) — LeadNet, a ~1M-param transformer trained
+  on the dataset's human preview choices (leads are public in turn 1;
+  brought mons are the ones that appeared), outcome- and rating-weighted.
+- [agents/lead_switch/lscfg.py](agents/lead_switch/lscfg.py) — every
+  experiment knob (kept out of the hashed `config.py` on purpose).
+- [export_lead_switch.py](export_lead_switch.py) — presets the three bundle
+  variants (`expert` / `value` / `nn`) and ships LeadNet inside the bundle.
+
+Move requests still go through the untouched frozen chooser, so a round-robin
+series between a variant bundle and the plain baseline bundle isolates the
+value of positioning alone. [tests/test_lead_switch.py](tests/test_lead_switch.py)
+gates the selectors without needing Node or a checkpoint.
+
 ### File-by-file summary
 
 | file | what / why it exists |

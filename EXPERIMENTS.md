@@ -42,6 +42,48 @@ roughly 4 seconds per epoch after compilation, but it was not evaluated in
 search. Treat it as evidence that architecture/representation efficiency is
 worth testing, not as a replacement agent.
 
+## Team preview + forced switch-ins (exp/lead-switch, pile-only)
+
+**Lane: pile-only.** Shared behavior files touched: **none** (the experiment
+knobs live in `agents/lead_switch/lscfg.py`, not `config.py`; the frozen
+chooser, model, and search are byte-identical to trunk).
+
+**What changed.** The stock adapter answers team preview with `team 1234`
+and forced switches with a random legal pick. `lead_switch_server.py`
+subclasses it and routes exactly those two request kinds through selectors
+(`agents/lead_switch/`): `expert` (damage-calc matchup scoring over all 90
+bring/lead combos vs a softmax model of the opponent's 15 lead pairs, plus
+Gen-IV-style switch-in scoring), `value` (the frozen baseline value head
+evaluating hypothetical post-decision positions, expert-pruned, scored
+mean/min over opponent leads), and `nn` (LeadNet, a ~1M-param transformer
+imitating human preview choices, outcome/rating-weighted). Move requests are
+untouched, so any Elo delta against the plain baseline bundle isolates
+positioning alone.
+
+**Method notes.**
+- Team preview is simultaneous, so the value variant scores
+  `0.5*mean + 0.5*min` over the opponent's expert-ranked lead pairs rather
+  than best-responding to a single assumed lead.
+- The value head cannot see which four are brought (turn-1 states encode
+  leads only), so the back pair always comes from the expert coverage term;
+  the payoff matrix only ranks lead pairs.
+- Forced-switch hypotheticals need no sim stepping — switching only moves
+  mons between slots — so a decision is one batched net call.
+- Dataset fact (train split): humans led with their first two team-sheet
+  mons in only a small minority of games (printed by `train_leads.py` as the
+  `team 1234` floor), so the stock adapter plays a lead humans avoid in most
+  games.
+
+**LeadNet offline numbers** (same match-id splits as the frozen baseline;
+one example per game per perspective, not per transition):
+_pending — filled by `python train_leads.py` (val/test lead-pair top-1 and
+top-3 vs the human choice, with the first-pair floor for context)._
+
+**Elo** — the metric that matters — requires the big box (`ckpt_best.pt`):
+export `rr-baseline` + the three variants and run 100-game series per
+LEAD_SWITCH_RUNBOOK.md. _Results pending; offline metrics above are NOT
+evidence of playing strength._
+
 ## Baseline identity
 
 - Checkpoint SHA-256: `9685d185c7f30166eebbc0f3d62beaf8660783aef7fc3eb1b48b861d26533138`

@@ -361,6 +361,54 @@ HELP = {
         Options:
           -h, --help         Show this help message and exit.
     """,
+    "train_leads.py": """
+        Train LeadNet (team-preview bring-4/lead-2 imitation) from parsed
+        battles, using the baseline tokenizer's vocab and match-id splits.
+
+        Usage: python train_leads.py [options]
+
+        Options:
+          --epochs N         Training epochs (default: LSConfig.nn_epochs).
+          --batch N          Batch size (default: LSConfig.nn_batch).
+          --max-battles N    Cap parsed battles read (smoke tests).
+          --out PATH         Checkpoint path (default: checkpoints/leadnet.pt).
+          --seed N           Torch/shuffle seed.
+          -h, --help         Show this help message and exit.
+    """,
+    "lead_switch_server.py": """
+        agent_server variant whose team-preview and forced-switch answers
+        come from the exp/lead-switch selectors; move requests still go
+        through the unmodified frozen chooser.
+
+        Usage: python lead_switch_server.py [options]
+
+        Options:
+          --agent KIND       search | policy | max-damage | random.
+          --ckpt PATH        Base-model checkpoint (default: ckpt_best.pt).
+          --leads SEL        first4 | expert | value | nn (default: expert).
+          --switch SEL       random | expert | value (default: expert).
+          --leadnet PATH     LeadNet checkpoint (required for --leads nn).
+          --name LABEL       Display name in the ready handshake.
+          --seed N           RNG seed.
+          -h, --help         Show this help message and exit.
+
+        Env:
+          VGC_NODE_DIR       Override Config.node_dir (shared Node install).
+    """,
+    "export_lead_switch.py": """
+        Export one lead/switch experiment variant as a pile bundle
+        (wraps export_agent.py; bundles LeadNet for the nn variant).
+
+        Usage: python export_lead_switch.py NAME --variant expert|value|nn
+
+        Options:
+          --variant V        expert | value | nn (default: expert).
+          --ckpt PATH        Base-model checkpoint (default: ckpt_best.pt).
+          --leadnet PATH     LeadNet checkpoint (default: checkpoints/leadnet.pt).
+          --pile PATH        Pile directory (default: $VGC_PILE or ../vgc-pile).
+          --notes TEXT       Notes stored in the manifest.
+          -h, --help         Show this help message and exit.
+    """,
 }
 
 
