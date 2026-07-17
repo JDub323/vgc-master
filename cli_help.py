@@ -12,8 +12,9 @@ HELP = {
         Usage: python agent_server.py --agent KIND [options]
 
         Options:
-          --agent KIND       search | policy | max-damage | random
-                             (experiment branches may add kinds).
+          --agent KIND       search | policy | max-damage | random |
+                             search-vh (baseline policy + swapped value brick;
+                             needs a value_lab.py combined checkpoint).
           --ckpt PATH        Checkpoint for net agents (default: ckpt_best.pt).
           --name LABEL       Display name in the ready handshake.
           --seed N           RNG seed for the chooser and forced switches.
@@ -21,6 +22,47 @@ HELP = {
 
         Env:
           VGC_NODE_DIR       Override Config.node_dir (shared Node install).
+    """,
+    "value_labels.py": """
+        Derive sidecar end-of-game margin labels (faint differential and
+        HP-sum differential at the last observed state) aligned 1:1 with the
+        existing prepped shards, without modifying them. Alignment is verified
+        by recomputing each row's weight/outcome against the shard columns.
+
+        Usage: python value_labels.py [--check-only]
+
+        Options:
+          --check-only       Verify alignment only; write nothing.
+          -h, --help         Show this help message and exit.
+
+        Writes artifacts/value_labels/{train,val,test}.npz.
+    """,
+    "value_lab.py": """
+        Train, rank, and package alternative leaf-value bricks against the
+        frozen baseline (exp/value-head). The baseline policy is untouched;
+        only the value scalar is swapped.
+
+        Usage:
+          python value_lab.py train  [--only A,B] [--ckpt PATH] [--quick]
+                                     [--aux-w W]
+          python value_lab.py eval   [--ckpt PATH] [--quick]
+          python value_lab.py select [NAME] [--ckpt PATH]
+          python value_lab.py all    [--ckpt PATH] [--quick] [--aux-w W]
+
+        Commands:
+          train              Train candidates (cls-mlp, attnpool,
+                             attnpool-mse, finetune) with early stopping.
+          eval               Rank control + candidates on val; report test.
+          select             Fit calibration temperature, write the combined
+                             checkpoint for --agent search-vh.
+          all                train + eval + select.
+
+        Options:
+          --ckpt PATH        Baseline checkpoint (default: ckpt_best.pt).
+          --only A,B         Train only the named candidates.
+          --aux-w W          Margin-aux loss weight (default 0.25).
+          --quick            Tiny-subset smoke run (laptop-sized).
+          -h, --help         Show this help message and exit.
     """,
     "export_agent.py": """
         Export the current working tree + behavior assets as one immutable,

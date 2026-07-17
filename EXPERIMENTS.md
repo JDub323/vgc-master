@@ -49,3 +49,42 @@ worth testing, not as a replacement agent.
 - Architecture: joint policy head, tokenizer layout 3, 561 tokens
 - Frozen source commit: `662211d`
 
+## Value-head brick swap (exp/value-head) — pile-only lane
+
+**What changed.** The baseline reads its leaf value from a single
+`Linear(256,1)+tanh` on the CLS token, trained jointly with the policy by MSE
+against the ±1 final outcome. This experiment keeps the base model and its
+policy/aux outputs bit-identical (same trunk forward, same heads) and swaps
+only the value scalar, so any strength change is attributable to the value
+brick alone. Candidates (`value_lab.py`, architectures in
+`models/value_heads.py`): an MLP on CLS; a learned-query attention-pooling
+head over all 561 token states (the value path sees mon blocks, belief
+tokens, and the damage matrix directly instead of through the CLS
+bottleneck); the same pooling head trained with the baseline's tanh+MSE loss
+(loss-vs-pooling ablation); and a dedicated value network (baseline-initialized
+trunk fine-tuned end-to-end on the value objective — one extra forward per
+leaf). The default loss is cross-entropy on the win logit ("value as
+classification"): tanh+MSE has vanishing gradients exactly on
+confidently-wrong predictions, and CE calibrates better, which matters because
+search mixes leaf values with exact ±1 terminal values. Training adds two
+sidecar auxiliary targets (end-of-game faint and HP-sum differentials,
+`value_labels.py`, aligned to the existing shards with recomputed
+weight/outcome proofs — shared shards untouched), and the selected brick gets
+a post-hoc calibration temperature fitted on the validation split (monotone:
+changes calibration, not ordering).
+
+**Shared files touched:** none with logic changes (pile-only; `agent_server.py`
+gained the `search-vh` kind and `cli_help.py` two help entries — neither is a
+behavior-hashed file). Selection is on validation Brier; the test split
+(46,751 transitions, same fixed splits as above) is reported once.
+
+**Numbers (fill from `value_lab.py eval` on the training box):**
+
+| value brick | test Brier | test sign acc | test AUC | test ECE |
+| --- | ---: | ---: | ---: | ---: |
+| control (baseline head) | TBD | TBD | TBD | TBD |
+
+**Search-strength result (fill from the round robin):** exported as
+`exp-value-head` (`--agent search-vh`); quick-10 vs the anchor, then a full
+series. Offline value metrics without a search result are reported as such.
+

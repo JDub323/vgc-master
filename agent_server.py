@@ -78,6 +78,16 @@ def build_chooser(kind, ckpt, cfg, seed=0):
     if kind == "max-damage":
         from agents.max_damage.v1 import MaxDamageChooser
         return MaxDamageChooser(cfg)
+    if kind == "search-vh":
+        import torch
+
+        from agents.determinized_duct.v1 import DeterminizedDUCTChooser
+        from models.value_heads import load_value_agent
+        from tokenizer import PositionTokenizer
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        return DeterminizedDUCTChooser(
+            load_value_agent(ckpt, cfg, device),
+            PositionTokenizer.load(cfg), cfg, seed=seed)
     if kind in ("search", "policy"):
         import torch
 
