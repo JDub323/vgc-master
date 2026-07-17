@@ -718,3 +718,42 @@ The code is laptop-debuggable but sized for a big box; the knobs that matter:
 - Opponent brought-4 under CTS is inferred (appeared mons + preview order
   fill), so the search may let the opponent switch to a mon they didn't
   actually bring.
+
+## JEPA world-model experiment (exp/jepa-world-model, pile-only)
+
+A self-contained experiment agent that replaces determinized tree search with a
+**learned latent world model plus a matrix-game solve**. It encodes the live
+position into per-entity latents, predicts the next-state latent of every
+candidate joint-action pair `(mine, opponent)`, reads a win-probability payoff
+off each predicted latent, averages that payoff matrix over belief
+determinizations, and solves the matrix for a mixed strategy. Full design and
+honest limits are in `JEPA_DESIGN.md`; the durable numbers land in
+`EXPERIMENTS.md`. It touches none of the ten hashed behavior files; the only
+edit outside its own tree is one additive kind in `agent_server.build_chooser`.
+
+New modules (none imported by the frozen trunk agents):
+
+| file | what |
+|---|---|
+| `jepa/config.py` | Experiment-local `JEPAConfig` (model/train/planner knobs), kept out of the hashed `config.py`. |
+| `jepa/vocab.py` | Stable id maps + dex lookups (base stats, types, move meta, mega stones) built from `dex.json` + `vocab.json`. |
+| `jepa/features.py` | CTS view + belief -> the fixed 16-entity feature layout (1 global + 6 ally + 6 foe + 2 opponent-intent + CLS) and per-token action arrays. |
+| `models/jepa_wm.py` | `JEPAWorldModel`: role-typed transformer encoder, action-conditioned predictor, value/grounded/policy heads, and an EMA target encoder. |
+| `jepa/solver.py` | Regret-matching solver turning a latent payoff matrix into a mixed strategy. |
+| `agents/jepa_world_model/v1.py` | `JEPAWorldModelChooser` (the `MoveChooser`) and its builder; runs the one-ply latent plan and matrix solve. |
+| `jepa_data.py` | Builds paired-transition shards `(s_t, a, b) -> s_{t+1}` into `artifacts/jepa_prepped` (never touches the layout-3 shards). |
+| `train_jepa.py` | Trains the world model (JEPA latent loss + value + grounded decoders + policy heads + VICReg, EMA target). |
+
+Run:
+
+```bash
+python tests/test_jepa.py                       # architecture smoke/contract tests
+python jepa_data.py --limit 200                 # tiny transition shards (add --damage for edges)
+python train_jepa.py --data artifacts/jepa_prepped --epochs 6
+python export_agent.py exp-jepa-wm --agent jepa \
+    --ckpt artifacts/checkpoints/jepa/jepa_wm.pt --architecture JEPA-WorldModel-MatrixSolve
+python round_robin.py play exp-jepa-wm rr-baseline --quick 10
+```
+
+Without a checkpoint the agent still runs (a random-init net that plays legally
+but weakly), so the bundle is always exportable.

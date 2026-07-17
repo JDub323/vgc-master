@@ -1,0 +1,248 @@
+"""Standalone smoke/contract tests for the JEPA world-model experiment.
+
+Runs without Node or trained weights: it builds the vocab from artifacts (or a
+tiny synthetic dex), exercises feature extraction, a full model forward, the
+matrix solver, an end-to-end ``choose`` against a mocked tracker/belief, and one
+training step on a synthetic shard. Run: ``python tests/test_jepa.py``.
+"""
+
+import random
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from actions import N_SLOT_ACTIONS
+from agents.jepa_world_model.v1 import JEPAWorldModelChooser
+from config import CFG
+from jepa.config import JEPAConfig
+from jepa.features import FeatureExtractor, N_MON_SCALAR, action_arrays
+from jepa.solver import solve_matrix
+from jepa.vocab import JEPAVocab, STATUSES, TERRAINS, WEATHERS
+from models.jepa_wm import JEPAWorldModel
+
+JCFG = JEPAConfig(d_model=96, d_ff=192, n_enc_layers=2, n_pred_layers=1,
+                  n_heads=4, n_determinizations=2, use_damage_features=False)
+
+
+def _vocab():
+    """Build a vocab from artifacts, or a tiny synthetic dex if none exist."""
+    v = JEPAVocab.build(CFG)
+    if len(v.species) > 4:
+        return v
+    dex = {"species": {f"mon{i}": {"baseStats": {"hp": 80, "atk": 100,
+            "def": 80, "spa": 100, "spd": 80, "spe": 90}, "types": ["Water"]}
+            for i in range(12)},
+           "moves": {f"mv{i}": {"priority": 0, "category": "Physical",
+            "basePower": 80, "type": "Water", "target": "normal"}
+            for i in range(12)},
+           "items": {}}
+    return JEPAVocab([f"mon{i}" for i in range(12)],
+                     [f"mv{i}" for i in range(12)], ["static"], ["static"], dex)
+
+
+def _mon_set(name, species, moves):
+    """Return a minimal own-team ``PokemonSet``."""
+    return {"name": name, "species": species, "item": "", "ability": "static",
+            "moves": moves, "nature": "serious", "evs": [0] * 6, "gender": "N",
+            "level": 50}
+
+
+def _own_view(k, species, moves, active_slot):
+    """Build a ``MonOwnView`` dict for team index ``k``."""
+    return {"team_idx": k, "species_cur": species, "hp": 1.0, "status": "",
+            "boosts": dict.fromkeys(("atk", "def", "spa", "spd", "spe",
+                                     "accuracy", "evasion"), 0),
+            "fainted": False, "active_slot": active_slot,
+            "appeared": active_slot is not None, "mega_done": False,
+            "turns_active": 1 if active_slot is not None else 0, "protect_ct": 0,
+            "item_consumed": False, "set": _mon_set(f"Mon{k}", species, moves)}
+
+
+def _opp_view(k, species, active_slot):
+    """Build a ``MonOpponentView`` dict for team index ``k``."""
+    return {"team_idx": k, "species_cur": species, "level": 50, "gender": "N",
+            "hp": 1.0, "status": "", "boosts": dict.fromkeys(
+                ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion"), 0),
+            "fainted": False, "active_slot": active_slot,
+            "appeared": active_slot is not None, "mega_done": False,
+            "turns_active": 1 if active_slot is not None else 0, "protect_ct": 0,
+            "revealed_moves": [], "revealed_item": None, "item_consumed": False,
+            "revealed_ability": None}
+
+
+def _mock_battle(vocab):
+    """Build a mock (tracker, belief, request, view) with two active mons/side."""
+    sp = [k for k in vocab.species if k not in ("__pad__", "__unk__")][:6]
+    mv = [k for k in vocab.moves if k not in ("__pad__", "__unk__")][:4]
+    my_team = [_own_view(k, sp[k], mv, {0: 0, 1: 1}.get(k)) for k in range(6)]
+    opp_team = [_opp_view(k, sp[k], {0: 0, 1: 1}.get(k)) for k in range(6)]
+    conds = {"tailwind": False, "reflect": False, "lightscreen": False,
+             "auroraveil": False}
+    view = {"turn": 3, "weather": "", "terrain": "", "trickroom": False,
+            "my": {"team": my_team, "mega_available": True, "conditions": dict(conds)},
+            "opp": {"team": opp_team, "mega_available": True, "conditions": dict(conds)}}
+
+    mons = [SimpleNamespace(team_idx=k, set=my_team[k]["set"]) for k in range(6)]
+    tracker = SimpleNamespace(_view=lambda side: view,
+                              sides={"p1": SimpleNamespace(mons=mons)})
+
+    def summary():
+        return {k: {"item": "", "p_item": 0.5, "spe_lo": 80.0, "spe_hi": 130.0,
+                    "bulk": 12000.0, "nature": "serious", "p_nature": 0.4}
+                for k in range(6)}
+
+    belief = SimpleNamespace(
+        summary=summary,
+        top_particle=lambda k: {"moves": mv, "item": "", "ability": "static",
+                                "nature": "serious"},
+        sample_sets=lambda n, rng: [[{"species": sp[k], "moves": mv, "item": "",
+                                       "ability": "static", "nature": "serious"}
+                                     for k in range(6)] for _ in range(n)])
+
+    def moves_req():
+        return [{"move": m, "id": m, "pp": 10, "disabled": False,
+                 "target": "normal"} for m in mv[:2]]
+    pokemon = [{"ident": f"p1: Mon{k}", "details": sp[k],
+                "condition": "100/100", "active": k in (0, 1)} for k in range(4)]
+    request = {"active": [{"moves": moves_req()}, {"moves": moves_req()}],
+               "side": {"id": "p1", "pokemon": pokemon}}
+    return tracker, belief, request, view
+
+
+def test_features_and_actions():
+    """Feature extraction yields the fixed layout and resolvable actions."""
+    vocab = _vocab()
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary(),
+                                          brought=[0, 1, 2, 3])
+    assert pos.mon_cat.shape == (12, 10)
+    assert pos.mon_scalar.shape == (12, N_MON_SCALAR)
+    assert pos.my_active == {0: 0, 1: 1} and pos.opp_active == {0: 0, 1: 1}
+    act = action_arrays(pos, (1, 1), (1, 1), vocab)
+    assert act.shape == (12, 7)
+    assert act[0, 0] == 1  # my slot-0 mon takes a move
+
+
+def test_model_forward():
+    """Encode/predict/value/grounded/policy heads return correct shapes."""
+    vocab = _vocab()
+    model = JEPAWorldModel(vocab.sizes(), JCFG, vocab.state())
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    b = _batch([pos], model)
+    z = model.encode(b)
+    assert z.shape == (1, 16, JCFG.d_model)
+    act = torch.as_tensor(action_arrays(pos, (1, 1), (1, 1), vocab))[None]
+    zp = model.predict(z, act, b["dmg"])
+    assert zp.shape == z.shape
+    assert model.value(zp).shape == (1,)
+    g = model.grounded(zp)
+    assert g["hp"].shape == (1, 12) and g["status"].shape == (1, 12, len(STATUSES))
+    my, opp = model.policies(z)
+    assert my.shape == (1, 2, N_SLOT_ACTIONS) and opp.shape == (1, 2, N_SLOT_ACTIONS)
+
+
+def test_solver_finds_mixed_strategy():
+    """A matching-pennies payoff matrix yields a ~uniform mixed strategy."""
+    m = np.array([[1.0, -1.0], [-1.0, 1.0]])
+    p, q, val = solve_matrix(m, 500)
+    assert abs(p[0] - 0.5) < 0.05 and abs(q[0] - 0.5) < 0.05
+    assert abs(val) < 0.05
+    # a dominated row collapses to the dominant one
+    p2, _, _ = solve_matrix(np.array([[1.0, 1.0], [0.0, 0.0]]), 500)
+    assert p2[0] > 0.9
+
+
+def test_chooser_end_to_end():
+    """A random-init chooser returns a legal joint action and full ChoiceInfo."""
+    vocab = _vocab()
+    model = JEPAWorldModel(vocab.sizes(), JCFG, vocab.state())
+    chooser = JEPAWorldModelChooser(model, vocab, CFG, JCFG, seed=0, bridge=None)
+    tracker, belief, request, _ = _mock_battle(vocab)
+    joint, info = chooser.choose(tracker, belief, "p1", request, [0, 1, 2, 3],
+                                 temperature=0.0)
+    assert isinstance(joint, tuple) and len(joint) == 2
+    assert joint[0].kind in ("move", "switch", "pass")
+    for key in ("value", "solve", "strategy", "q", "opp_pred", "health"):
+        assert key in info
+    assert -1.0 <= info["value"] <= 1.0
+    # the real planner ran (not the first-legal fallback)
+    assert info["health"].get("determinizations") == JCFG.n_determinizations
+    assert info["strategy"] and info["strategy"][0][0] != "fallback:first-legal"
+    # the chosen joint converts to a valid Showdown choice string
+    from actions import joint_choice
+    name_to_idx = {f"Mon{k}": k for k in range(6)}
+    choice = joint_choice(request, joint, name_to_idx)
+    assert isinstance(choice, str) and choice
+    # temperature > 0 still returns a legal action
+    joint2, _ = chooser.choose(tracker, belief, "p1", request, [0, 1, 2, 3],
+                               temperature=1.0)
+    assert isinstance(joint2, tuple)
+
+
+def test_training_step_runs():
+    """One synthetic minibatch backpropagates through every loss term."""
+    from train_jepa import losses
+    vocab = _vocab()
+    model = JEPAWorldModel(vocab.sizes(), JCFG, vocab.state())
+    sizes = vocab.sizes()
+    b = 8
+    rng = np.random.default_rng(0)
+    cat = lambda n, hi: torch.as_tensor(rng.integers(0, hi, size=(b, n)))
+
+    def pos(pref):
+        return {pref + "gcat": torch.stack([
+                    torch.as_tensor(rng.integers(0, len(WEATHERS), b)),
+                    torch.as_tensor(rng.integers(0, len(TERRAINS), b))], 1),
+                pref + "gscal": torch.rand(b, 18),
+                pref + "mcat": torch.stack([
+                    torch.as_tensor(rng.integers(0, min(sizes["species"], 12), (b, 12)))
+                    for _ in range(10)], -1),
+                pref + "mscal": torch.rand(b, 12, N_MON_SCALAR),
+                pref + "dmg": torch.rand(b, 6, 6)}
+    sh = {**pos("cur_"), **pos("nxt_"),
+          "act": torch.as_tensor(rng.integers(0, 3, (b, 12, 7))),
+          "value": (rng.integers(0, 2, b) * 2 - 1).astype("float32"),
+          "weight": np.ones(b, "float32"),
+          "a_slot": rng.integers(0, N_SLOT_ACTIONS, (b, 2)),
+          "b_slot": rng.integers(0, N_SLOT_ACTIONS, (b, 2))}
+    sh["value"] = torch.as_tensor(sh["value"])
+    sh["weight"] = torch.as_tensor(sh["weight"])
+    sh["a_slot"] = torch.as_tensor(sh["a_slot"])
+    sh["b_slot"] = torch.as_tensor(sh["b_slot"])
+    # cur/nxt status column must be a valid status class
+    for pref in ("cur_", "nxt_"):
+        sh[pref + "mcat"][..., 7] = torch.as_tensor(
+            rng.integers(0, len(STATUSES), (b, 12)))
+    loss, metrics = losses(model, sh, JCFG)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert metrics["total"] > 0
+
+
+def _batch(positions, model):
+    """Stack positions into a device tensor dict (test-local helper)."""
+    dev = next(model.parameters()).device
+    t = lambda arr, dt: torch.as_tensor(np.stack(arr), dtype=dt, device=dev)
+    return {"gcat": t([p.global_cat for p in positions], torch.long),
+            "gscal": t([p.global_scalar for p in positions], torch.float32),
+            "mcat": t([p.mon_cat for p in positions], torch.long),
+            "mscal": t([p.mon_scalar for p in positions], torch.float32),
+            "dmg": t([p.dmg_edge for p in positions], torch.float32)}
+
+
+TESTS = [test_features_and_actions, test_model_forward,
+         test_solver_finds_mixed_strategy, test_chooser_end_to_end,
+         test_training_step_runs]
+
+
+if __name__ == "__main__":
+    for t in TESTS:
+        t()
+        print(f"ok  {t.__name__}")
+    print("all jepa tests passed")

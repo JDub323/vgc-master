@@ -78,6 +78,9 @@ def build_chooser(kind, ckpt, cfg, seed=0):
     if kind == "max-damage":
         from agents.max_damage.v1 import MaxDamageChooser
         return MaxDamageChooser(cfg)
+    if kind == "jepa":
+        from agents.jepa_world_model.v1 import build_jepa_chooser
+        return build_jepa_chooser(ckpt, cfg, seed=seed)
     if kind in ("search", "policy"):
         import torch
 
