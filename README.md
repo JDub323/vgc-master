@@ -245,11 +245,14 @@ per-slot checkpoints, and checkpoint-only benchmark bundles are unsupported.
 python benchmark.py list                  # includes the frozen `baseline`
 python benchmark.py list
 
-# 0.5 widen the self-play team distribution (optional, recommended): mine
-#     real high-rated Reg M-B teams so the net can't memorize the 10-replica
-#     pool's pairwise artifacts. Stat points are redacted on sheets; they are
-#     filled from the Pikalytics objective prior and sim-validated.
-python teams.py --build-pool 30      # -> artifacts/selfplay_teams.json
+# 0.5 widen the self-play team distribution (optional, recommended): real
+#     teams so the net can't memorize the 10-replica pool's pairwise
+#     artifacts. Two sources, both sim-validated into selfplay_teams.json:
+python teams.py --fetch-pool         # ~1.2k Reg M-B tournament pastes (VGenC
+                                     # index) with REAL EV/nature spreads
+python teams.py --build-pool all     # + every distinct dataset sheet (~2.8k;
+                                     # stat points redacted -> filled from the
+                                     # Pikalytics objective prior)
 python teams.py --pool               # inspect; --import-pool FILE adds more
 
 # 1. self-play (the main event): fork the BC net, generate -> train -> gate

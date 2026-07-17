@@ -331,11 +331,19 @@ HELP = {
           --validate         Validate every replica team with the simulator.
           --mine [N]         Print the N most common high-rated dataset teams
                              (default: 10).
-          --build-pool [N]   Mine N real Reg M-B teams (default: 30), fill
-                             redacted stat points from the Pikalytics prior,
-                             validate, write artifacts/selfplay_teams.json.
-                             selfplay.py + profile_selfplay.py sample the
-                             pool automatically once it exists.
+          --build-pool [N|all]  Mine N real Reg M-B teams from the dataset
+                             (default: 30; 'all' = every distinct sheet,
+                             ~2.8k, up to 3 variants per species combo),
+                             fill redacted stat points from the Pikalytics
+                             prior, validate, write
+                             artifacts/selfplay_teams.json. selfplay.py +
+                             profile_selfplay.py sample the pool
+                             automatically once it exists.
+          --fetch-pool [N]   Download real tournament teams (full EV/nature
+                             sheets via pokepaste) from the VGenC top-teams
+                             index into the pool; cached under
+                             artifacts/pastes/, rate-limited. N caps the
+                             count (default: everything for the format).
           --import-pool FILE Add teams from a Showdown export/backup dump
                              (any teams database exports this) to the pool.
           --pool             List the current self-play pool.

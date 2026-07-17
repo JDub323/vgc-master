@@ -14,23 +14,33 @@ the rest of the repo uses.
 Self-play team pool: ten replica teams are too few for self-play — the model
 can memorize pairwise interactions that are artifacts of the fixed pool
 (which spreads/items every Garchomp always has) rather than the metagame.
-``--build-pool N`` mines the N most common real high-rated Reg M-B team
-sheets from the parsed dataset (legal by construction, one per distinct
-species combination), fills their redacted natures/stat points from the
-Pikalytics objective prior (``spreads.json``; a base-stat heuristic when a
-species is uncovered), validates each through the sim's TeamValidator, and
-writes ``artifacts/selfplay_teams.json``. ``--import-pool FILE`` adds teams
-from any Showdown export/backup dump (the format every teams database
-exports). ``selfplay_pool()`` — used by selfplay.py and profile_selfplay.py —
-returns replicas plus the pool; benchmark.py and round_robin.py keep the
-fixed replica grid so ratings stay comparable.
+Three ways to grow it, all sim-validated into ``artifacts/selfplay_teams.json``:
+
+  ``--fetch-pool``     downloads the format's real tournament teams from the
+                       VGenC top-teams index (pokepaste-backed, curated from
+                       the VGCPastes repository / Limitless VGC / Pikalytics)
+                       — tournament pastes carry REAL EV/nature spreads,
+                       unlike redacted ladder sheets. Cached, rate-limited.
+  ``--build-pool N``   mines real Reg M-B sheets from the parsed dataset
+                       (``all`` = every distinct sheet, ~2.8k); sheet natures
+                       are real, redacted stat points are filled from the
+                       Pikalytics objective prior (``spreads.json``; base-stat
+                       heuristic for uncovered species).
+  ``--import-pool F``  ingests any Showdown export/backup dump by hand.
+
+``selfplay_pool()`` — used by selfplay.py and profile_selfplay.py — returns
+replicas plus the pool; benchmark.py and round_robin.py keep the fixed
+replica grid so ratings stay comparable.
 
 CLI:
   python teams.py --list          # names + archetypes
   python teams.py --show NAME     # print the export text (paste into client)
   python teams.py --validate      # run every team through the sim's TeamValidator
   python teams.py --mine [N]      # top-N real teams from the parsed dataset
-  python teams.py --build-pool [N]     # mine+fill+validate the self-play pool
+  python teams.py --build-pool [N|all]  # mine+fill+validate the self-play pool
+                                        # ('all' = every distinct dataset sheet)
+  python teams.py --fetch-pool [N]     # download real tournament pastes (full
+                                       # EV/nature sheets) from the VGenC index
   python teams.py --import-pool FILE   # add a Showdown export dump to the pool
   python teams.py --pool          # list the current self-play pool
 """
@@ -679,6 +689,9 @@ def parse_export(text) -> list:
         if gm:
             gender = gm.group(1)
             name = name[:gm.start()].strip()
+        nm = re.search(r"\(([^()]+)\)\s*$", name)   # 'Nick (Species)' pastes
+        if nm:
+            name = nm.group(1).strip()
         s = {"name": name, "species": name, "item": sid(item), "ability": "",
              "moves": [], "nature": "serious", "evs": [0] * 6,
              "gender": gender, "level": 50}
@@ -851,53 +864,77 @@ def _load_priors(cfg):
     return spreads, dex
 
 
-def _finish_pool_teams(candidates, cfg, seed, source, existing=None):
+def _finish_pool_teams(candidates, cfg, seed, source, existing=None,
+                       per_combo=1, verbose_drops=10):
     """Fill spreads, validate through the sim, and return pool entries.
 
-    candidates: iterable of (team_sets, seen_count). One team per distinct
-    species combination is kept (variety beats duplicates in self-play)."""
+    candidates: iterable of (team_sets, seen_count[, extra_meta]). Exact
+    duplicate sheets are skipped and at most ``per_combo`` variants of one
+    species combination are kept (variety beats duplicates in self-play;
+    a large pool can afford a few spread/item variants per archetype)."""
     from env import Sidecar, pack_team
     spreads, dex = _load_priors(cfg)
     rng = random.Random(seed)
     sc = Sidecar(cfg)
     out = dict(existing or {})
-    used = {frozenset(sid(s["species"]) for s in e["sets"])
-            for e in out.values()}
+    combo_ct = Counter(frozenset(sid(s["species"]) for s in e["sets"])
+                       for e in out.values())
+    exact = {tuple(sorted((sid(s["species"]), s["item"],
+                           tuple(sorted(s["moves"])), s["nature"],
+                           tuple(s["evs"])) for s in e["sets"]))
+             for e in out.values()}
     fills, dropped = Counter(), 0
     try:
-        for team, seen in candidates:
+        for cand in candidates:
+            team, seen = cand[0], cand[1]
+            extra = cand[2] if len(cand) > 2 else {}
             key = frozenset(sid(s["species"]) for s in team)
-            if key in used or len(team) < 4:
+            if combo_ct[key] >= per_combo or len(team) < 4:
                 continue
             team = [dict(s, name=s["species"], moves=list(s["moves"]),
                          evs=list(s["evs"])) for s in team]
             for s in team:
                 fills[_fill_spread(s, spreads, dex, rng)] += 1
+            sheet = tuple(sorted((sid(s["species"]), s["item"],
+                                  tuple(sorted(s["moves"])), s["nature"],
+                                  tuple(s["evs"])) for s in team))
+            if sheet in exact:
+                continue
             resp = sc.rpc({"op": "validate", "format": cfg.format_id,
                            "team": pack_team(team)})
             if resp.get("problems"):
                 dropped += 1
-                print(f"  drop {', '.join(sorted(s['species'] for s in team))}"
-                      f": {resp['problems'][0]}")
+                if dropped <= verbose_drops:
+                    print(f"  drop "
+                          f"{', '.join(sorted(s['species'] for s in team))}"
+                          f": {resp['problems'][0]}")
                 continue
-            used.add(key)
-            name = (f"{source}{len(out):03d}-"
+            combo_ct[key] += 1
+            exact.add(sheet)
+            name = (f"{source}{len(out):04d}-"
                     + "-".join(sid(s["species"])[:10] for s in team[:2]))
-            out[name] = {"sets": team, "seen": seen}
+            out[name] = {"sets": team, "seen": seen, **extra}
     finally:
         sc.close()
-    print(f"  spread fill: {dict(fills)}; {dropped} dropped by the validator")
+    print(f"  spread fill: {dict(fills)}; {dropped} dropped by the validator"
+          + (f" (first {verbose_drops} shown)" if dropped > verbose_drops
+             else ""))
     return out
 
 
 def build_pool(n=30, cfg=CFG, seed=0, min_rating=1200):
     """Mine, fill, validate, and write the self-play pool; return None.
 
-    Scans the parsed Reg M-B dataset for the most common team sheets among
-    higher-rated games (mirrors --mine), keeps one per species combination,
-    and writes artifacts/selfplay_teams.json. Reproducible for a given
-    (dataset, n, seed)."""
+    Scans the parsed Reg M-B dataset for team sheets, most common first
+    (mirrors --mine), and writes artifacts/selfplay_teams.json. n=0 means
+    "everything": every distinct sheet from every game regardless of rating
+    (up to 3 variants per species combination) — the full ~2.8k-sheet
+    dataset for maximum self-play variety. A finite n keeps the old
+    curated behavior: rating-filtered, one sheet per species combination.
+    Reproducible for a given (dataset, n, seed). Existing vgenc/imported
+    entries in the pool file are preserved."""
     from data import iter_battles
+    everything = n == 0
     counts, samples = Counter(), {}
     for fn in cfg.dataset_files:
         if "regmb" not in fn:
@@ -906,24 +943,108 @@ def build_pool(n=30, cfg=CFG, seed=0, min_rating=1200):
         for rec in iter_battles(cfg.parsed_dir / f"{fmt}.pkl"):
             for p, team in rec["teams"].items():
                 r = rec["ratings"].get(p)
-                if (r is not None and r < min_rating) or len(team) < 6:
+                if len(team) < 6 or (not everything and r is not None
+                                     and r < min_rating):
                     continue
                 key = tuple(sorted(
                     (s["species"], s["item"], tuple(sorted(s["moves"])),
                      s["ability"]) for s in team))
                 counts[key] += 1
                 samples.setdefault(key, team)
-    print(f"{len(counts)} distinct high-rated Reg M-B sheets in the dataset")
-    candidates = [(samples[k], c) for k, c in counts.most_common(n * 3)]
-    entries = _finish_pool_teams(candidates, cfg, seed, "mined")   # dedupes
-    entries = dict(list(entries.items())[:n])
-    payload = {"_meta": {"built": date.today().isoformat(), "seed": seed,
-                         "min_rating": min_rating, "format": cfg.format_id,
-                         "source": "dataset mine + spreads.json fill"},
+    print(f"{len(counts)} distinct Reg M-B sheets in the dataset"
+          + ("" if everything else f" (rating >= {min_rating} or unrated)"))
+    limit = len(counts) if everything else n * 3
+    candidates = [(samples[k], c) for k, c in counts.most_common(limit)]
+    prior = _load_pool_entries(cfg, keep=lambda name: not
+                               name.startswith("mined"))
+    entries = _finish_pool_teams(candidates, cfg, seed, "mined",
+                                 existing=prior,
+                                 per_combo=3 if everything else 1)
+    if not everything:
+        keep_n = len(prior) + n
+        entries = dict(list(entries.items())[:keep_n])
+    _write_pool(entries, cfg, seed=seed, min_rating=min_rating)
+
+
+def _load_pool_entries(cfg, keep=lambda name: True):
+    """Return the existing pool's entries passing ``keep`` ({} if unbuilt)."""
+    p = pool_path(cfg)
+    if not p.exists():
+        return {}
+    return {k: v for k, v in json.loads(p.read_text())["teams"].items()
+            if keep(k)}
+
+
+def _write_pool(entries, cfg, **meta):
+    """Write the pool file and print the new sampling size; return None."""
+    payload = {"_meta": {"built": date.today().isoformat(),
+                         "format": cfg.format_id, **meta},
                "teams": entries}
     pool_path(cfg).write_text(json.dumps(payload, indent=1))
     print(f"{len(entries)} pool teams -> {pool_path(cfg)} "
           f"(self-play now samples {len(entries) + len(TEAMS)} teams)")
+
+
+VGENC_INDEX = "https://vgenc.net/static/top-teams-data.json"
+
+
+def fetch_pool(limit=0, cfg=CFG, seed=0, index_url=VGENC_INDEX):
+    """Download real tournament teams into the self-play pool; return None.
+
+    Pulls the VGenC top-teams index (curated from the VGCPastes repository,
+    Limitless VGC, and Pikalytics), filters it to the configured regulation,
+    fetches each entry's pokepaste (full team sheets WITH real tournament
+    EV/stat-point spreads and natures — unlike ladder sheets, tournament
+    pastes are not redacted), and validates/merges them into the pool.
+    Pastes are cached under artifacts/pastes/ so reruns are incremental;
+    fetches are rate-limited. limit=0 takes everything available."""
+    import time
+    import urllib.request
+
+    def get(url):
+        req = urllib.request.Request(url, headers={"User-Agent": "vgc-bot"})
+        return urllib.request.urlopen(req, timeout=30).read().decode()
+
+    reg = "M-B" if cfg.format_id.endswith("regmb") else "M-A"
+    idx = [t for t in json.loads(get(index_url))
+           if t.get("reg") == reg
+           and t.get("pp", "").startswith("https://pokepast.es/")]
+    if limit:
+        idx = idx[:limit]
+    print(f"{len(idx)} {reg} tournament pastes in the index")
+    cache = cfg.artifacts_dir / "pastes"
+    cache.mkdir(parents=True, exist_ok=True)
+    candidates, fetched, failed = [], 0, 0
+    for t in idx:
+        pid = t["pp"].rstrip("/").rsplit("/", 1)[-1]
+        f = cache / f"{pid}.txt"
+        if not f.exists():
+            try:
+                f.write_text(get(t["pp"].rstrip("/") + "/raw"))
+                fetched += 1
+                time.sleep(0.15)             # be polite to pokepast.es
+            except Exception as exc:
+                failed += 1
+                if failed <= 5:
+                    print(f"  fetch failed {t['pp']}: {exc}")
+                continue
+        try:
+            sets = parse_export(f.read_text())
+        except Exception:
+            failed += 1
+            continue
+        meta = {"paste": t["pp"], "player": t.get("p", ""),
+                "event": t.get("t", ""), "placing": t.get("r", "")}
+        candidates.append((sets, 0, meta))
+        if (len(candidates) + failed) % 200 == 0:
+            print(f"  ... {len(candidates)} pastes ready "
+                  f"({fetched} newly fetched, {failed} failed)", flush=True)
+    print(f"{len(candidates)} pastes parsed "
+          f"({fetched} newly fetched, {failed} failed)")
+    entries = _finish_pool_teams(candidates, cfg, seed, "vgenc",
+                                 existing=_load_pool_entries(cfg),
+                                 per_combo=3)
+    _write_pool(entries, cfg, seed=seed, fetched_from=index_url)
 
 
 def import_pool(path, cfg=CFG, seed=0):
@@ -984,8 +1105,12 @@ if __name__ == "__main__":
         mine(int(sys.argv[i + 1]) if len(sys.argv) > i + 1 else 10)
     elif "--build-pool" in sys.argv:
         i = sys.argv.index("--build-pool")
-        build_pool(int(sys.argv[i + 1]) if len(sys.argv) > i + 1
-                   and sys.argv[i + 1].isdigit() else 30)
+        arg = sys.argv[i + 1] if len(sys.argv) > i + 1 else ""
+        build_pool(0 if arg == "all" else int(arg) if arg.isdigit() else 30)
+    elif "--fetch-pool" in sys.argv:
+        i = sys.argv.index("--fetch-pool")
+        arg = sys.argv[i + 1] if len(sys.argv) > i + 1 else ""
+        fetch_pool(int(arg) if arg.isdigit() else 0)
     elif "--import-pool" in sys.argv:
         import_pool(sys.argv[sys.argv.index("--import-pool") + 1])
     elif "--pool" in sys.argv:
