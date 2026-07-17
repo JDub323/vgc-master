@@ -73,12 +73,41 @@ weight/outcome proofs — shared shards untouched), and the selected brick gets
 a post-hoc calibration temperature fitted on the validation split (monotone:
 changes calibration, not ordering).
 
-**Shared files touched:** none with logic changes (pile-only; `agent_server.py`
-gained the `search-vh` kind and `cli_help.py` two help entries — neither is a
-behavior-hashed file). Selection is on validation Brier; the test split
-(46,751 transitions, same fixed splits as above) is reported once.
+**Data quality — the dominant lever on this dataset.** The ±1 outcome label is
+high-variance because much of a game's result depends on play many turns after
+the position being scored (comebacks, opponent blunders). A game-ending audit
+(`value_labels.py`, streamed over the parsed battles) quantified two concrete
+label-noise sources, and the value loss now handles all three by default
+(each configurable, each needing `python value_labels.py` first):
 
-**Numbers (fill from `value_lab.py eval` on the training box):**
+- *Abandoned games* — ended with ≤1 total faint across both sides
+  (rage-quit/disconnect/misclick concession, ~5.5% of rows). Their outcome is
+  near-noise; dropped from the value loss. (A normally decisive game ends with
+  the loser at 3+ faints, since the 4th lands during the final turn's
+  resolution after the last decision — verified in the audit: ~65% of games
+  end at exactly 3 loser faints.)
+- *Over-long games* — the stall/Trick-Room tail beyond `--max-game-turns`
+  (default 14, ~5% of rows). Median game ends ~turn 7 and 95% by turn 12, so
+  these are rare outliers with atypical dynamics; dropped from the value loss.
+- *Progression weighting* — each surviving row's loss is scaled from 0.7×
+  (team preview) up to 1.0× (last turn played), so a turn-2 position whose
+  label reflects 15 more turns of play is fit less hard than a near-terminal
+  one. Mild by design (`--progression-floor`, `--progression-gamma`).
+
+Note the corrected reading of the per-phase table: `tokenizer.py`'s TURN_
+buckets are `[3,6,9,12,16,20,25]` and the phase `n` counts *transitions*, not
+games — so the small late-bucket counts are just VGC game length (few games
+reach turn 13+), not mass forfeiture. Metrics are reported on the *clean*
+subset (abandoned + over-long held out); the full-set control/winner Brier is
+printed alongside for comparability with the baseline row.
+
+**Shared files touched:** none with logic changes (pile-only; `agent_server.py`
+gained the `search-vh` kind and `cli_help.py` help entries — neither is a
+behavior-hashed file). Selection is on validation Brier over the clean subset;
+the test split (46,751 transitions, same fixed splits as above) is reported
+once.
+
+**Numbers (fill from `value_lab.py eval` on the training box; clean subset):**
 
 | value brick | test Brier | test sign acc | test AUC | test ECE |
 | --- | ---: | ---: | ---: | ---: |

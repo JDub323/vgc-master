@@ -25,9 +25,12 @@ HELP = {
     """,
     "value_labels.py": """
         Derive sidecar end-of-game margin labels (faint differential and
-        HP-sum differential at the last observed state) aligned 1:1 with the
-        existing prepped shards, without modifying them. Alignment is verified
-        by recomputing each row's weight/outcome against the shard columns.
+        HP-sum differential at the last observed state) and each row's
+        game-progression fraction (turn / that battle's final turn), aligned
+        1:1 with the existing prepped shards, without modifying them.
+        Alignment is verified by recomputing each row's weight/outcome
+        against the shard columns and cross-checking progression against the
+        shard's own decoded TURN_ bucket token.
 
         Usage: python value_labels.py [--check-only]
 
@@ -42,12 +45,23 @@ HELP = {
         frozen baseline (exp/value-head). The baseline policy is untouched;
         only the value scalar is swapped.
 
+        Data-quality filtering and progression weighting are default-on and
+        need 'python value_labels.py' run first (without the sidecar the lab
+        warns and uses the raw split).
+
         Usage:
           python value_lab.py train  [--only A,B] [--ckpt PATH] [--quick]
-                                     [--aux-w W]
+                                     [--aux-w W] [--progression-floor F]
+                                     [--progression-gamma G]
+                                     [--max-game-turns N] [--keep-abandoned]
           python value_lab.py eval   [--ckpt PATH] [--quick]
+                                     [--max-game-turns N] [--keep-abandoned]
           python value_lab.py select [NAME] [--ckpt PATH]
+                                     [--max-game-turns N] [--keep-abandoned]
           python value_lab.py all    [--ckpt PATH] [--quick] [--aux-w W]
+                                     [--progression-floor F]
+                                     [--progression-gamma G]
+                                     [--max-game-turns N] [--keep-abandoned]
 
         Commands:
           train              Train candidates (cls-mlp, attnpool,
@@ -61,6 +75,18 @@ HELP = {
           --ckpt PATH        Baseline checkpoint (default: ckpt_best.pt).
           --only A,B         Train only the named candidates.
           --aux-w W          Margin-aux loss weight (default 0.25).
+          --progression-floor F
+                             Weight later positions more: the loss multiplier
+                             ramps from F (team preview) to 1.0 (last turn
+                             played). Default 0.7 (mild). F=1.0 disables it.
+          --progression-gamma G
+                             Shape of the floor->1.0 ramp (default 1.0,
+                             linear in game-progression fraction).
+          --max-game-turns N Drop rows from games lasting more than N turns
+                             (default 14; the long stall/TR tail). N=0 keeps
+                             all lengths.
+          --keep-abandoned   Keep games that ended with <=1 total faint
+                             (rage-quit/disconnect); dropped by default.
           --quick            Tiny-subset smoke run (laptop-sized).
           -h, --help         Show this help message and exit.
     """,

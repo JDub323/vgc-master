@@ -17,14 +17,31 @@ Candidates:
   finetune       dedicated value net: baseline-initialized trunk fine-tuned
                  end-to-end on the value objective (2nd forward per leaf)
 
+Data quality (all default-on; need ``python value_labels.py`` first — without
+the sidecar the lab warns and trains/evaluates on the raw split):
+  - abandoned games (<=1 total faint: rage-quit/disconnect, junk +-1 label)
+    are dropped from training, val early-stopping, and eval;
+  - over-long games (> --max-game-turns, default 14 — the stall/Trick-Room
+    tail) are dropped the same way;
+  - later positions are weighted a little more than early ones
+    (--progression-floor, default 0.7 -> 1.0), since an early position's +-1
+    label reflects many later turns of play it cannot see.
+Metrics are reported on this clean subset; the full-set control/winner Brier
+is also printed for comparability with EXPERIMENTS.md's baseline row.
+
 CLI:
   python value_lab.py train  [--only A,B] [--ckpt PATH] [--quick] [--aux-w W]
-  python value_lab.py eval   [--ckpt PATH] [--quick]
-  python value_lab.py select [NAME] [--ckpt PATH]
+                             [--progression-floor F] [--progression-gamma G]
+                             [--max-game-turns N] [--keep-abandoned]
+  python value_lab.py eval   [--ckpt PATH] [--quick] [--max-game-turns N]
+                             [--keep-abandoned]
+  python value_lab.py select [NAME] [--ckpt PATH] [--max-game-turns N]
+                             [--keep-abandoned]
   python value_lab.py all    [--ckpt PATH] [--quick] [--aux-w W]
+                             [--progression-floor F] [--progression-gamma G]
+                             [--max-game-turns N] [--keep-abandoned]
 
-Artifacts land under ``cfg.checkpoint_dir/value_lab/``; margins (optional but
-recommended) come from ``python value_labels.py``. ``select`` writes
+Artifacts land under ``cfg.checkpoint_dir/value_lab/``. ``select`` writes
 ``combined_best.pt`` for ``agent_server.py --agent search-vh`` /
 ``export_agent.py --agent search-vh``.
 """
@@ -54,7 +71,7 @@ from models.value_heads import (AttnPoolHead, CLSMLPHead, ValueNet,
                                 value_from_logit)
 from tokenizer import N_MONS, PositionTokenizer
 from train import Shards
-from value_labels import load_margins
+from value_labels import load_margins, load_progression, load_sidecar
 
 # name -> (kind, arch, loss/output, epochs, lr). Ordered cheap -> expensive.
 CANDIDATES = {
@@ -69,6 +86,36 @@ CANDIDATES = {
 }
 PATIENCE = 2          # early-stop epochs without a val-Brier improvement
 QUICK_ROWS = {"train": 2048, "val": 512, "test": 512}
+
+# Data-quality defaults (all need `python value_labels.py` first; if the
+# sidecar is absent they degrade to no-op with a warning). See value_labels.py.
+DEFAULT_MAX_GAME_TURNS = 14    # drop rows from games lasting >14 turns (the
+#                                long stall/Trick-Room tail, ~2% of games)
+DEFAULT_DROP_ABANDONED = True  # drop rows from games that ended <=1 total
+#                                faint (rage-quit/disconnect, junk z label)
+# Mild "later positions matter a bit more" weighting, on by default: the
+# earliest position is weighted 0.7x, ramping linearly to 1.0x at the last
+# turn played. floor=1.0 disables it entirely.
+DEFAULT_PROGRESSION_FLOOR = 0.7
+DEFAULT_PROGRESSION_GAMMA = 1.0
+
+
+def keep_mask(sidecar, n, max_game_turns=DEFAULT_MAX_GAME_TURNS,
+              drop_abandoned=DEFAULT_DROP_ABANDONED):
+    """Boolean ``[n]`` training/eval mask from the sidecar quality flags.
+
+    Drops rows whose game ended in early abandonment (<=1 total faint) or ran
+    longer than ``max_game_turns``. All-True (keep everything) when the
+    sidecar is missing or both filters are disabled. ``[:n]`` keeps quick-mode
+    row-subsets aligned to their truncated shard slice."""
+    mask = np.ones(n, dtype=bool)
+    if sidecar is None:
+        return mask
+    if drop_abandoned and "abandoned" in sidecar:
+        mask &= sidecar["abandoned"][:n] == 0
+    if max_game_turns and "final_turn" in sidecar:
+        mask &= sidecar["final_turn"][:n] <= max_game_turns
+    return mask
 
 
 class ShardSlice:
@@ -97,6 +144,24 @@ class ShardSlice:
 def load_split(split, cfg=CFG, quick=False):
     """Return the full ``Shards`` split, or a tiny ``ShardSlice`` in quick mode."""
     return ShardSlice(split, cfg) if quick else Shards(split, cfg)
+
+
+class SplitView:
+    """Boolean-masked row view of a split (tokens/value/weight only).
+
+    Used to hold out the abandoned and over-long games from validation and
+    test so selection and reporting target the positions the value head is
+    actually meant to judge."""
+
+    def __init__(self, ds, mask):
+        """Slice ``ds``'s fields to the rows where ``mask`` is true."""
+        self.tokens = ds.tokens[mask]
+        self.value = ds.value[mask]
+        self.weight = ds.weight[mask]
+
+    def __len__(self):
+        """Return the number of retained rows."""
+        return len(self.tokens)
 
 
 def out_dir(cfg=CFG):
@@ -133,25 +198,52 @@ def _forward(base, module, spec, tokens):
     return module(tokens)
 
 
+def progression_weight(p, floor=1.0, gamma=1.0):
+    """Map a [0,1] game-progression fraction to a loss-weight multiplier.
+
+    ``floor`` is the minimum multiplier (at team preview, p=0); it ramps to
+    1.0 at p=1 (the last turn played) following ``p ** gamma``. floor=1.0 is
+    the identity (no reweighting) — the default, so existing behavior is
+    unchanged unless explicitly opted into via --progression-floor."""
+    return floor + (1.0 - floor) * np.clip(p, 0.0, 1.0) ** gamma
+
+
 def train_candidate(name, spec, base, tr, va, margins_tr, device, cfg,
-                    aux_w=0.25, quick=False):
+                    aux_w=0.25, quick=False, progression_tr=None,
+                    progression_floor=1.0, progression_gamma=1.0,
+                    train_idx=None):
     """Train one candidate with early stopping; save and return its record.
 
     Loss = sample-weighted CE (or MSE for the ablation) on the +-1 outcome
     plus ``aux_w`` x sample-weighted MSE on the sidecar margins when built.
-    Early stopping tracks unweighted validation Brier — the selection metric —
-    so training and selection cannot disagree about what "better" means."""
+    ``train_idx`` (if given) restricts training to those row indices — the
+    data-quality filter drops early-abandoned and over-long games upstream.
+    When ``progression_tr`` is given and ``progression_floor < 1.0``, the
+    per-row sample weight is additionally multiplied by
+    ``progression_weight`` — a proxy for "how much of the eventual z this
+    position could plausibly explain" (see value_labels.py), so a turn-2
+    row that got labeled by 20 more turns of play (opponent blunders,
+    comebacks) is fit less aggressively than a turn-20 row close to the
+    actual result. Early stopping tracks unweighted validation Brier on the
+    (already-filtered) ``va`` — the selection metric — so training and
+    selection cannot disagree about what "better" means."""
     torch.manual_seed(0)
     module = build_module(spec, base)
     n_params = sum(p.numel() for p in module.parameters())
     use_aux = margins_tr is not None
+    use_progression = progression_tr is not None and progression_floor < 1.0
+    pool = np.arange(len(tr)) if train_idx is None else np.asarray(train_idx)
     print(f"\n=== {name}: {spec} | {n_params / 1e6:.2f}M trainable params | "
-          f"aux margins {'on' if use_aux else 'off (run value_labels.py)'} ===")
+          f"{len(pool)}/{len(tr)} rows after quality filter | "
+          f"aux margins {'on' if use_aux else 'off (run value_labels.py)'} | "
+          + (f"progression weight floor={progression_floor:.2f} "
+             f"gamma={progression_gamma:.2f}" if use_progression
+             else "progression weight off") + " ===")
     opt = torch.optim.AdamW(module.parameters(), lr=spec["lr"],
                             weight_decay=0.01)
     epochs = 1 if quick else spec["epochs"]
     bs = cfg.batch_size
-    steps_per_epoch = math.ceil(len(tr) / bs)
+    steps_per_epoch = math.ceil(len(pool) / bs)
     total = max(1, steps_per_epoch * epochs)
     warmup = min(100, total // 10 + 1)
 
@@ -168,12 +260,17 @@ def train_candidate(name, spec, base, tr, va, margins_tr, device, cfg,
     for epoch in range(epochs):
         module.train()
         t0, run_loss, seen = time.time(), 0.0, 0
-        order = rng.permutation(len(tr))
+        order = rng.permutation(pool)
         for s in range(0, len(order), bs):
             idx = order[s:s + bs]
             t = torch.as_tensor(tr.tokens[idx].astype(np.int64), device=device)
             z = torch.as_tensor(tr.value[idx].astype(np.float32), device=device)
-            w = torch.as_tensor(tr.weight[idx].astype(np.float32), device=device)
+            sw = tr.weight[idx].astype(np.float32)
+            if use_progression:
+                sw = sw * progression_weight(progression_tr[idx],
+                                             progression_floor,
+                                             progression_gamma)
+            w = torch.as_tensor(sw, device=device)
             with _autocast(device):
                 out = _forward(base, module, spec, t)
             logit = out[:, 0].float()
@@ -214,7 +311,11 @@ def train_candidate(name, spec, base, tr, va, margins_tr, device, cfg,
                         "hp": module.hp, "state": best["state"]},
               "spec": {k: v for k, v in spec.items()},
               "history": history, "best_val_brier": best["brier"],
-              "aux_margins": use_aux, "aux_w": aux_w}
+              "aux_margins": use_aux, "aux_w": aux_w,
+              "train_rows": int(len(pool)),
+              "progression": {"on": use_progression,
+                              "floor": progression_floor,
+                              "gamma": progression_gamma}}
     torch.save(record, out_dir(cfg) / f"{name}.pt")
     print(f"saved {out_dir(cfg) / (name + '.pt')} "
           f"(best val Brier {best['brier']:.4f} @ epoch {best['epoch']})")
@@ -349,14 +450,33 @@ def _restore(record, base, device):
     return module
 
 
-def evaluate_all(base, device, cfg, quick=False):
+def evaluate_all(base, device, cfg, quick=False,
+                 max_game_turns=DEFAULT_MAX_GAME_TURNS,
+                 drop_abandoned=DEFAULT_DROP_ABANDONED):
     """Rank control + every trained candidate on val, report test; persist.
 
-    Prints the selection table (val Brier is the criterion), the test-split
-    detail for the anchor and the winner, appends one ``leaf_evaluator``
-    BrickEvaluation per row, and writes ``results.json`` for ``select``."""
+    Metrics are computed on the *clean* subset — abandoned and over-long
+    games held out (see keep_mask) — so selection targets the positions the
+    value head is meant to judge; the full-set control/winner Brier is printed
+    as a footnote for comparability with EXPERIMENTS.md's baseline row. Prints
+    the selection table (val Brier is the criterion), the winner's phase
+    breakdown, appends one ``leaf_evaluator`` BrickEvaluation per row, and
+    writes ``results.json`` for ``select``."""
     tok = PositionTokenizer.load(cfg)
-    va, te = load_split("val", cfg, quick), load_split("test", cfg, quick)
+    va_full, te_full = load_split("val", cfg, quick), load_split("test", cfg, quick)
+    va_side, te_side = load_sidecar("val", cfg), load_sidecar("test", cfg)
+    va_mask = keep_mask(va_side, len(va_full), max_game_turns, drop_abandoned)
+    te_mask = keep_mask(te_side, len(te_full), max_game_turns, drop_abandoned)
+    va, te = SplitView(va_full, va_mask), SplitView(te_full, te_mask)
+    if te_side is None:
+        print("NOTE: no artifacts/value_labels/ sidecar — evaluating on the "
+              "FULL split (run 'python value_labels.py' to hold out abandoned "
+              "and over-long games)")
+    else:
+        print(f"clean-subset eval: kept val {va_mask.sum()}/{len(va_full)}, "
+              f"test {te_mask.sum()}/{len(te_full)} rows "
+              f"(dropped abandoned + games >{max_game_turns} turns)")
+
     rows, store = {}, EvaluationStore(cfg=cfg)
     v_control_te = control_values(base, te.tokens, cfg)
     rows["control"] = {"val": value_metrics(control_values(base, va.tokens, cfg),
@@ -391,25 +511,43 @@ def evaluate_all(base, device, cfg, quick=False):
         if rows[best]["val"]["brier"] >= rows["control"]["val"]["brier"]:
             print("WARNING: no candidate beats the control on val Brier — "
                   "the honest result is 'keep the baseline head'")
-        print(f"\n{best} by game phase (test):")
+        print(f"\n{best} by game phase (clean test subset):")
         print(f"    {'turn bucket':>12s} {'n':>7s} {'sign acc':>9s} "
               f"{'Brier':>7s} {'mean |v|':>9s}")
         for b, n, acc, brier, mabs in phase_table(per_split_values[best],
                                                   te.value, te.tokens, tok):
             print(f"    {b:>12d} {n:7d} {acc:9.1%} {brier:7.4f} {mabs:9.3f}")
+        if te_side is not None and len(te_full) > len(te):
+            c_full = value_metrics(control_values(base, te_full.tokens, cfg),
+                                   te_full.value)["brier"]
+            b_mod = _restore(trained_candidates(cfg)[best], base, device)
+            b_full = value_metrics(
+                candidate_values(base, b_mod,
+                                 trained_candidates(cfg)[best]["spec"],
+                                 te_full.tokens, device, cfg),
+                te_full.value)["brier"]
+            print(f"\nfull test set incl. abandoned + long games (comparable "
+                  f"to EXPERIMENTS.md baseline): control Brier {c_full:.4f}, "
+                  f"{best} Brier {b_full:.4f}")
 
+    filter_cfg = {"max_game_turns": max_game_turns,
+                  "drop_abandoned": drop_abandoned,
+                  "clean_test_rows": int(len(te)),
+                  "full_test_rows": int(len(te_full))}
     for name, r in rows.items():
         store.append(BrickEvaluation(
             brick_impl=f"exp-value-head/{name}", suite="leaf_evaluator",
             metrics={f"{s}_{k}": v for s in ("val", "test")
                      for k, v in r[s].items()},
-            cases=len(te.value), config={}, metadata={"floors": fl}))
+            cases=len(te.value), config={},
+            metadata={"floors": fl, "filter": filter_cfg}))
     (out_dir(cfg) / "results.json").write_text(json.dumps(
-        {"rows": rows, "floors": fl, "ranking": ranked}, indent=1))
+        {"rows": rows, "floors": fl, "ranking": ranked,
+         "filter": filter_cfg}, indent=1))
     print(f"\nwrote {out_dir(cfg) / 'results.json'} and appended "
           f"brick_evaluations rows")
 
-    print("\n--- paste-ready EXPERIMENTS.md table ---")
+    print("\n--- paste-ready EXPERIMENTS.md table (clean test subset) ---")
     print("| value brick | test Brier | test sign acc | test AUC | test ECE |")
     print("| --- | ---: | ---: | ---: | ---: |")
     for name in ["control"] + ranked:
@@ -436,8 +574,14 @@ def fit_temperature(logits, y, output="bce"):
     return best_t
 
 
-def select(base, base_ckpt_raw, device, cfg, name=None, quick=False):
-    """Package one candidate (default: best val Brier) as a combined agent."""
+def select(base, base_ckpt_raw, device, cfg, name=None, quick=False,
+           max_game_turns=DEFAULT_MAX_GAME_TURNS,
+           drop_abandoned=DEFAULT_DROP_ABANDONED):
+    """Package one candidate (default: best val Brier) as a combined agent.
+
+    The calibration temperature is fitted on the same clean validation subset
+    used for selection, so the deployed probabilities are calibrated on the
+    positions the head is meant to judge."""
     results = json.loads((out_dir(cfg) / "results.json").read_text())
     ranking = results["ranking"]
     assert ranking, "no trained candidates — run 'value_lab.py train' first"
@@ -445,7 +589,9 @@ def select(base, base_ckpt_raw, device, cfg, name=None, quick=False):
     record = trained_candidates(cfg)[name]
     spec = record["spec"]
     module = _restore(record, base, device)
-    va = load_split("val", cfg, quick)
+    va_full = load_split("val", cfg, quick)
+    va = SplitView(va_full, keep_mask(load_sidecar("val", cfg), len(va_full),
+                                      max_game_turns, drop_abandoned))
     logits = candidate_logits(base, module, spec, va.tokens, device, cfg)
     temperature = fit_temperature(
         logits, (va.value.astype(np.float64) + 1) / 2, spec["output"])
@@ -488,26 +634,54 @@ def main(cfg=CFG):
     base_raw = torch.load(ckpt, map_location="cpu", weights_only=False)
     print(f"base checkpoint: {ckpt} | device {device}")
 
+    # Data-quality filter (applies to train, val early-stopping, and eval).
+    max_game_turns = int(opt("--max-game-turns", DEFAULT_MAX_GAME_TURNS))
+    drop_abandoned = "--keep-abandoned" not in args and DEFAULT_DROP_ABANDONED
+
     if cmd in ("train", "all"):
         only = opt("--only")
         names = [n.strip() for n in only.split(",")] if only \
             else list(CANDIDATES)
         aux_w = float(opt("--aux-w", 0.25))
+        prog_floor = float(opt("--progression-floor", DEFAULT_PROGRESSION_FLOOR))
+        prog_gamma = float(opt("--progression-gamma", DEFAULT_PROGRESSION_GAMMA))
         tr = load_split("train", cfg, quick)
-        va = load_split("val", cfg, quick)
-        margins_tr = load_margins("train", cfg)
-        if quick and margins_tr is not None:
+        va_full = load_split("val", cfg, quick)
+        side_tr = load_sidecar("train", cfg)
+        side_va = load_sidecar("val", cfg)
+        margins_tr = None if side_tr is None else side_tr["margins"]
+        progression_tr = None if side_tr is None else side_tr["progression"]
+        if side_tr is None:
+            print("WARNING: no artifacts/value_labels/ sidecar — training on "
+                  "the RAW split (no abandoned/long-game filter, no margin "
+                  "aux, no progression weighting). Run 'python "
+                  "value_labels.py' to enable them.")
+        if quick and side_tr is not None:
             margins_tr = margins_tr[:len(tr.tokens)]
-        print(f"train {len(tr.tokens)} / val {len(va.tokens)} transitions")
+            progression_tr = progression_tr[:len(tr.tokens)]
+        train_idx = np.where(
+            keep_mask(side_tr, len(tr.tokens), max_game_turns,
+                      drop_abandoned))[0]
+        va = SplitView(va_full, keep_mask(side_va, len(va_full),
+                                          max_game_turns, drop_abandoned))
+        print(f"train {len(train_idx)}/{len(tr.tokens)} (filtered) / "
+              f"val {len(va)}/{len(va_full)} transitions")
         for name in names:
             train_candidate(name, CANDIDATES[name], base, tr, va, margins_tr,
-                            device, cfg, aux_w=aux_w, quick=quick)
+                            device, cfg, aux_w=aux_w, quick=quick,
+                            progression_tr=progression_tr,
+                            progression_floor=prog_floor,
+                            progression_gamma=prog_gamma,
+                            train_idx=train_idx)
     if cmd in ("eval", "all"):
-        evaluate_all(base, device, cfg, quick=quick)
+        evaluate_all(base, device, cfg, quick=quick,
+                     max_game_turns=max_game_turns,
+                     drop_abandoned=drop_abandoned)
     if cmd in ("select", "all"):
         picked = args[1] if cmd == "select" and len(args) > 1 \
             and not args[1].startswith("--") else None
-        select(base, base_raw, device, cfg, name=picked, quick=quick)
+        select(base, base_raw, device, cfg, name=picked, quick=quick,
+               max_game_turns=max_game_turns, drop_abandoned=drop_abandoned)
 
 
 if __name__ == "__main__":

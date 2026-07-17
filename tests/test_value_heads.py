@@ -151,6 +151,77 @@ def test_battle_margins():
     assert abs(mh1 + mh2) < 1e-9                # perspectives are mirrored
 
 
+def test_battle_final_turn_and_turn_bucket():
+    """Final turn is the max recorded 'n'; bucket matches tokenizer.py."""
+    from value_labels import battle_final_turn, turn_bucket
+    from tokenizer import TURN_EDGES
+    rec = {"turns": [{"n": 0}, {"n": 5}, {"n": 12}, {"n": 3}]}
+    assert battle_final_turn(rec) == 12
+    assert battle_final_turn({"turns": []}) == 0
+    for edge in TURN_EDGES:
+        assert turn_bucket(edge) == turn_bucket(edge - 1)
+        assert turn_bucket(edge + 1) == turn_bucket(edge) + 1
+    assert turn_bucket(0) == 0
+    assert turn_bucket(1000) == len(TURN_EDGES)
+
+
+def test_progression_is_monotone_and_capped():
+    """Recomputed progression rises with turn number and never exceeds 1."""
+    from value_labels import battle_final_turn
+    rec = {"turns": [{"n": n} for n in (0, 1, 2, 3, 4, 5)]}
+    final = max(1, battle_final_turn(rec))
+    fracs = [min(1.0, t["n"] / final) for t in rec["turns"]]
+    assert fracs == sorted(fracs)
+    assert fracs[-1] == 1.0
+    assert all(0.0 <= f <= 1.0 for f in fracs)
+
+
+def test_battle_total_faints_and_abandonment():
+    """Total faints read both sides from p1's public view; <=1 = abandoned."""
+    from value_labels import battle_total_faints
+    mon = lambda fainted: {"hp": 0.0 if fainted else 1.0, "fainted": fainted}
+    # decisive: loser (p1's opp here) at 3 faints, winner at 1 -> 4 total
+    decisive = {"p1": {"my": {"team": [mon(True), mon(False)]},
+                       "opp": {"team": [mon(True), mon(True)]}}}
+    rec = {"turns": [{"states": None}, {"states": decisive}]}
+    assert battle_total_faints(rec) == 3
+    # early quit: nobody fainted -> abandoned
+    quit_state = {"p1": {"my": {"team": [mon(False), mon(False)]},
+                         "opp": {"team": [mon(False), mon(False)]}}}
+    assert battle_total_faints({"turns": [{"states": quit_state}]}) == 0
+    assert battle_total_faints({"turns": [{"states": None}]}) == 0
+
+
+def test_keep_mask_drops_abandoned_and_long_games():
+    """keep_mask drops abandoned rows and games over the turn cap."""
+    from value_lab import keep_mask
+    side = {"abandoned": np.array([1, 0, 0, 0], dtype=np.uint8),
+            "final_turn": np.array([2, 6, 20, 10], dtype=np.int16)}
+    m = keep_mask(side, 4, max_game_turns=14, drop_abandoned=True)
+    assert list(m) == [False, True, False, True]   # row0 abandoned, row2 long
+    # disabling both filters keeps everything
+    m2 = keep_mask(side, 4, max_game_turns=0, drop_abandoned=False)
+    assert m2.all()
+    # no sidecar -> keep everything
+    assert keep_mask(None, 4).all()
+
+
+def test_progression_weight_identity_when_floor_is_one():
+    """floor=1.0 (the default) leaves every sample weight unchanged."""
+    from value_lab import progression_weight
+    p = np.array([0.0, 0.3, 0.7, 1.0])
+    assert np.allclose(progression_weight(p, floor=1.0, gamma=1.0), 1.0)
+
+
+def test_progression_weight_ramps_from_floor_to_one():
+    """floor<1.0 discounts early rows and leaves late rows near full weight."""
+    from value_lab import progression_weight
+    w = progression_weight(np.array([0.0, 0.5, 1.0]), floor=0.2, gamma=1.0)
+    assert abs(w[0] - 0.2) < 1e-9
+    assert abs(w[-1] - 1.0) < 1e-9
+    assert w[0] < w[1] < w[2]
+
+
 def test_fit_temperature_improves_overconfident_logits():
     """Grid calibration finds T>1 for overconfident logits and lowers NLL."""
     from value_lab import fit_temperature
