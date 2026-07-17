@@ -220,7 +220,7 @@ no custom battle GUI to maintain):
    `max-damage`, or `random`,
 3. open `https://play.pokemonshowdown.com/~~localhost:8000`, paste the
    printed team into Teambuilder → Import from text, and challenge the bot,
-4. watch `http://localhost:8010` — a live dashboard of the bot's brain:
+4. watch `http://127.0.0.1:8010` — a live dashboard of the bot's brain:
    the probability it assigns to **your** likely actions (with the bot's
    expected value for each of those branches and the search visits it spent
    there), its belief about your items/speed (with sprites), and its

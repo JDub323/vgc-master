@@ -14,7 +14,7 @@ Flow (`python play.py`, menus are interactive; flags skip them):
      paste it into the client: Teambuilder -> Import from text.
   3. Open the printed client URL, pick any username, and challenge the bot
      (its username is printed) to the Champions Reg M-B format.
-  4. Watch http://localhost:8010 while you play.
+  4. Watch http://127.0.0.1:8010 while you play.
 
 Flags: --team NAME --bot search|policy|max-damage|random --games N
        --ckpt PATH --no-server --debug
@@ -489,7 +489,8 @@ def main(cfg=CFG):
     print(f"2. import your team (also saved to {cfg.artifacts_dir / 'my_team.txt'}):")
     print("   Teambuilder -> Import from text, format: " + cfg.format_id)
     print(f"3. challenge  {username}  to that format (chat: /user {username})")
-    print(f"4. watch the bot think:  http://localhost:{cfg.dashboard_port}")
+    # 127.0.0.1, not localhost: WSL2 forwards only IPv4 loopback to Windows
+    print(f"4. watch the bot think:  http://127.0.0.1:{cfg.dashboard_port}")
     print("=" * 72 + f"\n\n----- your team ({my_team}) -----\n{export}\n" + "-" * 33 + "\n")
 
     asyncio.run(player.accept_challenges(None, n_games))

@@ -244,7 +244,9 @@ class Spectator:
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", port), H)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        print(f"  spectate live at http://localhost:{port}  "
+        # 127.0.0.1, not localhost: under WSL2 Windows resolves localhost to
+        # ::1 first and the relay only forwards IPv4 loopback -> blank hang
+        print(f"  spectate live at http://127.0.0.1:{port}  "
               f"(flip between games; sprites + event log update each turn)")
 
 

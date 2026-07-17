@@ -260,7 +260,7 @@ def show(entries, limit=15):
 
 def open_replay(entry, port):
     """Print (and try to open) one replay's URL; return None."""
-    url = f"http://localhost:{port}/{quote(entry['rel'])}"
+    url = f"http://127.0.0.1:{port}/{quote(entry['rel'])}"
     print(f"  -> {url}")
     try:                      # native run: pops the browser; WSL/ssh: URL +
         webbrowser.open(url)  # VS Code's port-forward popup do the job
@@ -273,7 +273,7 @@ def repl(root, port):
     entries = scan(root)
     filt = ""
     print(f"{len(entries)} replays under {root}")
-    print(f"index: http://localhost:{port}/   "
+    print(f"index: http://127.0.0.1:{port}/   "
           "(type to filter, number to open, 'r' rescan, 'q' quit)")
     show(entries)
     while True:
@@ -334,7 +334,7 @@ def main(cfg=CFG):
         if entries:
             open_replay(entries[0], port)
     if "--serve" in args:
-        print(f"serving {root} at http://localhost:{port}/ (Ctrl-C stops)")
+        print(f"serving {root} at http://127.0.0.1:{port}/ (Ctrl-C stops)")
         try:
             while True:
                 time.sleep(3600)
