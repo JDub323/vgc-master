@@ -69,15 +69,24 @@ positioning alone.
   the payoff matrix only ranks lead pairs.
 - Forced-switch hypotheticals need no sim stepping — switching only moves
   mons between slots — so a decision is one batched net call.
-- Dataset fact (train split): humans led with their first two team-sheet
-  mons in only a small minority of games (printed by `train_leads.py` as the
-  `team 1234` floor), so the stock adapter plays a lead humans avoid in most
-  games.
+- Dataset fact: humans led with their first two team-sheet mons in only
+  **12.5%** of held-out games, so the stock adapter plays a lead humans
+  avoid seven times out of eight.
 
 **LeadNet offline numbers** (same match-id splits as the frozen baseline;
-one example per game per perspective, not per transition):
-_pending — filled by `python train_leads.py` (val/test lead-pair top-1 and
-top-3 vs the human choice, with the first-pair floor for context)._
+one example per game per perspective — 160,526 train / 8,600 val / 8,678
+test games; 6 epochs, ~6 min laptop CPU):
+
+| metric (vs the human lead pair) | val | test |
+| --- | ---: | ---: |
+| lead-pair top-1 | 0.235 | 0.223 |
+| lead-pair top-3 | 0.497 | 0.474 |
+| `team 1234` floor (first-pair rate) | — | 0.125 |
+| uniform floor (1/15 pairs) | 0.067 | 0.067 |
+
+Validation top-1 was still climbing at the epoch cap, so there is headroom
+(more epochs / d_model). Note these are imitation metrics against a
+*different* human on a *different* team, not a strength claim.
 
 **Elo** — the metric that matters — requires the big box (`ckpt_best.pt`):
 export `rr-baseline` + the three variants and run 100-game series per
