@@ -242,7 +242,16 @@ class Spectator:
             def log_message(self, *a):
                 pass
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+        try:
+            self.srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+        except OSError as exc:
+            raise OSError(
+                f"{exc} on port {port}. If nothing you started should be "
+                f"using it, this is usually a stuck/orphaned listener (WSL2 "
+                f"port-forward relays are a common cause) rather than a "
+                f"real conflict — try a different --dash-port, or "
+                f"`wsl --shutdown` from Windows to reset networking.") \
+                from exc
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         # 127.0.0.1, not localhost: under WSL2 Windows resolves localhost to
         # ::1 first and the relay only forwards IPv4 loopback -> blank hang
