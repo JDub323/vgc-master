@@ -14,6 +14,10 @@ Read `README.md` for what the bot is, and the codebase primer for how the
 algorithms work. This document is only about *how to land an experiment so it
 composes with everyone else's*.
 
+Instead of running the full training/test runs yourself, give tmux commands for me to run them when
+it is convenient: this is a shared hardware, so I can't just use it as much as possible, whenever I want.
+Smoke tests are good, but I will choose when the full tests are run.
+
 ---
 
 ## 0. The frame: the interface is the game protocol, not any class
