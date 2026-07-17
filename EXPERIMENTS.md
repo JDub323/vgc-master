@@ -78,11 +78,23 @@ No search-time (Elo) evaluation has been run yet; like the damage-ablation and
 MLP rows above, treat the offline curve as "wired and learning," nothing more.
 
 **Gates.** `tests/test_jepa.py`, `tests/test_documentation.py`, and
-`tests/test_agents.py` pass. `scenarios.py` could not be run **on the dev
-laptop only**: its damage bridge needs `@smogon/calc`, which is not installed in
-this box's `artifacts/node` — the same failure the trunk DUCT agent hits here,
-unrelated to this experiment (it touches no behavior files and `scenarios.py`
-never imports the JEPA code). It should pass unchanged on the coordinator box.
+`tests/test_agents.py` pass. `scenarios.py` and the `round_robin.py` quick
+series could not be run **on the dev laptop only**: this box's `artifacts/node`
+has the Node runtime but not the `pokemon-showdown` sim or `@smogon/calc`
+package, so any real game fails at `sidecar.js` / the damage bridge. That is a
+whole-repo environment gap (the trunk DUCT agent hits the identical failure
+here), unrelated to this experiment — it touches no behavior files and
+`scenarios.py` never imports the JEPA code. Both should run unchanged on the
+coordinator box, which supplies its own Node/sim via `$VGC_NODE_DIR`. The
+exported bundle builds and plans correctly through the real `agent_server`
+adapter (verified up to the point a live battle would feed protocol lines).
+
+**Bundle.** `exp-jepa-wm-smoke` exported to the pile (dev box:
+`../vgc-pile/exp-jepa-wm-smoke`, entrypoint
+`python agent_server.py --agent jepa --ckpt artifacts/checkpoints/ckpt.pt`).
+It carries the laptop-smoke weights; re-export after a full-scale train. To
+collect it for the round robin, `rsync -a` the bundle into the coordinator
+box's pile.
 
 **Open follow-ups (one blade each, do not widen this one).** Full-scale prep +
 train on a big box and an Elo series vs `baseline`; feeding reverse (foe→ally)
