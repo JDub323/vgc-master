@@ -758,3 +758,11 @@ The code is laptop-debuggable but sized for a big box; the knobs that matter:
 - Opponent brought-4 under CTS is inferred (appeared mons + preview order
   fill), so the search may let the opponent switch to a mon they didn't
   actually bring.
+- The pinned Showdown/`champions` mod sim lags the live game's movepool in
+  places: real Reg M-B tournament teams pulled by `teams.py --fetch-pool`
+  included legal current-game sets the pinned sim's `champions` learnsets
+  reject (seen: Icy Wind on Archaludon/Hydreigon/Rotom-Frost, Moonblast on
+  Ninetales-Alola — 378 of 1226 fetched pastes, 2026-07). Those teams are
+  correctly dropped by the TeamValidator rather than force-included, since
+  self-play must stay sim-legal, but it means the self-play team pool is
+  missing some real, currently-legal sets until the sim pin is bumped.
