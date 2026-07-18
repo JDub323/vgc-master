@@ -546,8 +546,15 @@ def main(cfg=CFG, jcfg=JCFG):
 
     last = spj_dir(cfg) / "spj_last.pt"
     if last.exists() and "--fresh" not in args:
+        if "--from" in args:
+            print(f"note: {last} already exists -- RESUMING from it; the "
+                  f"--from checkpoint you passed is ignored (it only seeds a "
+                  f"fresh run). Pass --fresh to fork from --from instead "
+                  f"(after moving aside the old buffer/state).", file=sys.stderr)
         model, _ = JEPAConsequenceModel.load(last, device)
-        print(f"resumed jepa-c self-play at iteration {state['iter'] + 1}")
+        n = sum(p.numel() for p in model.parameters())
+        print(f"resumed jepa-c self-play at iteration {state['iter'] + 1} "
+              f"({n/1e6:.1f}M params, d_model={model.jcfg.d_model})")
     else:
         stale = list(buffer_dir(cfg).glob("spj_*.npz"))
         assert not stale, \
