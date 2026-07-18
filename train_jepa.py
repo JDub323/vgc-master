@@ -7,7 +7,7 @@ that predicted latent, and ground the latent with next-state decoders
 generators; VICReg keeps the encoder from collapsing.
 
 CLI: python train_jepa.py [--data DIR] [--out PATH] [--epochs N] [--bs N]
-                          [--limit-shards N] [--damage]
+                          [--limit-shards N]
 """
 
 import json
@@ -139,11 +139,14 @@ def train(data_dir, out_path, cfg=CFG, jcfg=JCFG, epochs=None,
         vocab = JEPAVocab.from_state(json.loads(vstate_p.read_text()), load_dex(cfg))
     else:
         vocab = JEPAVocab.build(cfg)
-    model = JEPAWorldModel(vocab.sizes(), jcfg, vocab.state()).to(device)
-
     train_paths = sorted(data_dir.glob("train_*.npz")) or sorted(
         data_dir.glob("*.npz"))
     val_paths = sorted(data_dir.glob("val_*.npz"))
+    # Record whether the shards carry damage edges so the chooser only builds a
+    # damage bridge at play when the model trained on one (train/play parity).
+    jcfg.use_damage_features = bool(train_paths) and \
+        float(np.abs(np.load(train_paths[0])["cur_dmg"]).max()) > 0
+    model = JEPAWorldModel(vocab.sizes(), jcfg, vocab.state()).to(device)
     epochs = epochs or jcfg.epochs
     opt = torch.optim.AdamW(model.parameters(), lr=jcfg.lr,
                             weight_decay=jcfg.weight_decay)
@@ -215,9 +218,7 @@ def main():
         """Return the token after ``flag`` in argv, else ``default``."""
         return args[args.index(flag) + 1] if flag in args else default
 
-    jcfg = JCFG
-    if "--damage" in args:
-        jcfg.use_damage_features = True
+    jcfg = JCFG          # use_damage_features is auto-detected from the shards
     data = opt("--data", str(CFG.artifacts_dir / "jepa_prepped"))
     out = opt("--out", str(CFG.checkpoint_dir / "jepa" / "jepa_wm.pt"))
     epochs = opt("--epochs")

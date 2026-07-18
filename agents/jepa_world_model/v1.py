@@ -72,8 +72,8 @@ class JEPAWorldModelChooser:
         summary = belief.summary() if belief is not None else {}
         dmg = self._damage(view, belief)
         # single belief-summary pass drives candidate selection
-        pos0 = self.extractor.extract(view, summary, brought=brought,
-                                      opp_brought=opp_brought, dmg=dmg)
+        # brought/opp_brought left None to match prep (train/play parity).
+        pos0 = self.extractor.extract(view, summary, dmg=dmg)
         z0 = self.model.encode(self._batch([pos0]))
         my_logits, opp_logits = self.model.policies(z0)
         my_logits = my_logits[0].cpu().numpy()
@@ -90,9 +90,8 @@ class JEPAWorldModelChooser:
         v = np.zeros((na, nb), dtype=np.float64)
         for det in dets:
             opp_ms = _movesets(det)
-            pos = self.extractor.extract(view, summary, brought=brought,
-                                         opp_brought=opp_brought,
-                                         opp_movesets=opp_ms, dmg=dmg)
+            pos = self.extractor.extract(view, summary, opp_movesets=opp_ms,
+                                         dmg=dmg)
             v += self._payoffs(pos, my_cands, opp_cands)
         v /= len(dets)
 
@@ -260,12 +259,16 @@ def build_jepa_chooser(ckpt=None, cfg=CFG, jcfg=JCFG, seed=0):
     if model is None:
         vocab = JEPAVocab.build(cfg)
         model = JEPAWorldModel(vocab.sizes(), jcfg, vocab.state()).to(device)
+    # Use the model's stored config so play matches training -- crucially
+    # use_damage_features, which train_jepa sets from whether the shards carried
+    # damage edges. Feeding edges the model never trained on is off-distribution.
+    mjcfg = model.jcfg
     bridge = None
-    if jcfg.use_damage_features:
+    if getattr(mjcfg, "use_damage_features", False):
         try:
             from damage import DamageBridge
             bridge = DamageBridge(cfg)
         except Exception as exc:                       # no Node install -> skip
             print(f"[jepa] damage bridge unavailable ({exc}); using no edges",
                   file=sys.stderr)
-    return JEPAWorldModelChooser(model, vocab, cfg, jcfg, seed, bridge)
+    return JEPAWorldModelChooser(model, vocab, cfg, mjcfg, seed, bridge)
