@@ -241,7 +241,7 @@ def test_legal_my_joints_from_view():
     from jepa.features import legal_my_joints
     vocab = _vocab()
     _, _, _, view = _mock_battle(vocab)
-    joints = legal_my_joints(view, 64)
+    joints = legal_my_joints(view, vocab, 256)
     assert joints and all(len(j) == 2 for j in joints)
     kinds = {a.kind for j in joints for a in j}
     assert "move" in kinds

@@ -89,6 +89,26 @@ tiny set.) A simulated-counterfactual target path (replay a position, step the
 env sidecar with different opponent moves/seeds to get many futures per move)
 is **designed but not implemented** — it needs the Node sim, absent here.
 
+**Bug found and fixed (candidate-set degeneracy).** The first full train reached
+val policy top-1 0.917 but the exported agent lost 0-10 to `baseline` at
+0.02 s/move. Cause: the behavior-cloning candidate set in prep was
+`[human_move] + first-11-other-legal-joints`, and `legal_my_joints` listed
+switches first — so the negatives were almost all *switches*. The policy head
+only learned "human's attack vs a pile of switches" (trivial — hence the
+implausible 0.917 vs the repo's ~0.06 joint top-1), never learned to rank *which*
+attack/target, so its consequence vectors were nearly action-insensitive and at
+temperature 0 it deterministically played the first legal joint (a double-switch)
+every turn. Fixes: (1) prep now samples a *shuffled, diverse* subset of the full
+legal own-joint set as negatives; (2) `legal_my_joints` uses each move's real dex
+target semantics so candidates match play-time legality; (3) the chooser passes
+`brought=None` to match prep and uses the model's stored config, and
+`train_consequence` records whether the shards carried damage so the chooser
+never adds off-distribution damage edges. After the fix, val top-1 drops to a
+realistic ~0.22 (chance 0.083) on a 1,383-transition smoke, the predictor is
+action-sensitive (distinct consequence vectors per move), and the agent plays
+varied moves instead of a fixed double-switch. **A full re-prep + re-train is
+required** — the old shards baked in the degenerate candidates.
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT

@@ -238,14 +238,15 @@ def action_arrays(pos, my_joint, opp_joint, vocab):
     return arr
 
 
-def legal_my_joints(view, max_cand=64):
+def legal_my_joints(view, vocab, max_cand=256):
     """Enumerate plausible own joint actions from a view (no sim request).
 
-    Approximate doubles legality from public state: each active own mon's move
-    slots x foe/spread targets, plus switches to live bench mons. Used to build
-    behavior-cloning candidate sets during prep and, at play time, as a fallback
-    when the real request's legal set is unavailable. PP/disable are unknown
-    from a view, so this is a superset the policy head learns to rank."""
+    Mirrors ``actions.legal_slot_actions`` target semantics (using each move's
+    dex target type) so the candidate set matches play-time legality: each
+    active own mon's move slots x their real target codes, plus switches to live
+    bench mons. Used to build behavior-cloning candidate sets during prep. PP and
+    disable are unknown from a view, so this is a superset the policy head learns
+    to rank."""
     team = view["my"]["team"]
     active = {m["active_slot"]: m for m in team
               if m["active_slot"] is not None and not m["fainted"]}
@@ -256,11 +257,16 @@ def legal_my_joints(view, max_cand=64):
         """Own slot actions for one (possibly empty) active mon."""
         if m is None:
             return [SlotAction("pass")]
-        acts = []
-        for j in range(min(N_MOVES, len(m["set"]["moves"]))):
-            for tgt in (T_FOE_A, T_FOE_B, T_AUTO):
-                acts.append(SlotAction("move", move_slot=j, target=tgt))
-        acts += [SlotAction("switch", switch_to=k) for k in bench]
+        acts = [SlotAction("switch", switch_to=k) for k in bench]
+        for j, mv in enumerate(m["set"]["moves"][:N_MOVES]):
+            tgt = vocab.move_target(mv)
+            if tgt in ("normal", "any", "adjacentFoe"):
+                targets = (T_FOE_A, T_FOE_B, T_ALLY)
+            elif tgt == "adjacentAlly":
+                targets = (T_ALLY,)
+            else:                                # self / spread / field moves
+                targets = (T_AUTO,)
+            acts += [SlotAction("move", move_slot=j, target=t) for t in targets]
         return acts or [SlotAction("pass")]
 
     s0, s1 = slot_acts(active.get(0)), slot_acts(active.get(1))

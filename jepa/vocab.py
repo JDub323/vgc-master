@@ -142,6 +142,11 @@ class JEPAVocab:
         return (cat, float(md.get("basePower") or 0),
                 float(md.get("priority") or 0), int(md.get("category") == "Status"))
 
+    def move_target(self, m):
+        """Return a move's Showdown target string ('normal' when unknown)."""
+        md = self.dex.get("moves", {}).get(m)
+        return (md or {}).get("target", "normal")
+
     def has_mega(self, species, item):
         """True when ``item`` is a mega stone that evolves ``species``."""
         it = self.dex.get("items", {}).get(item or "")

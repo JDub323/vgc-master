@@ -18,11 +18,14 @@ emits the own-move candidate/future payload that feeds ``train_consequence.py``.
 CLI: python jepa_data.py [--out DIR] [--limit N] [--damage] [--consequence]
 """
 
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+
+_RNG = random.Random(0)          # deterministic negative-candidate shuffling
 
 from actions import from_index
 from config import CFG
@@ -176,12 +179,16 @@ def _wm_sample(pos, nxt, a, b, outcome, w, vocab):
 def _consequence_sample(pos, state, nxt, a, outcome, w, vocab, n_cand):
     """One consequence (v2) sample: own-move candidate set + future target.
 
-    The taken action is placed at candidate index 0; the rest are other legal
-    own joints, so the policy head learns to rank the human's move above them and
-    the JEPA loss matches candidate 0's consequence to the future ``nxt``."""
+    The taken action is at candidate index 0; the other candidates are a
+    *shuffled* sample of the full legal own-joint set, so the negatives are a
+    diverse mix of attacks/targets/switches (not switches-first). This forces
+    the policy head to rank the human's move against genuine alternatives rather
+    than a trivial attack-vs-switch split, and the JEPA loss matches candidate
+    0's consequence vector to the future ``nxt``."""
     a_true = (from_index(int(a[0])), from_index(int(a[1])))
-    cands = [a_true] + [c for c in legal_my_joints(state, 64) if c != a_true]
-    cands = cands[:n_cand]
+    others = [c for c in legal_my_joints(state, vocab, 256) if c != a_true]
+    _RNG.shuffle(others)
+    cands = [a_true] + others[:n_cand - 1]
     cand_acts = np.zeros((n_cand, 12, 7), dtype=np.int16)
     cand_mask = np.zeros(n_cand, dtype=bool)
     for j, cd in enumerate(cands):

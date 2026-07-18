@@ -76,9 +76,10 @@ class JEPAConsequenceChooser:
         passes = 0
         for det in dets:
             opp_ms = _movesets(det)
-            pos = self.extractor.extract(view, summary, brought=brought,
-                                         opp_brought=opp_brought,
-                                         opp_movesets=opp_ms, dmg=dmg)
+            # brought/opp_brought left as None to match prep (jepa_data passes
+            # neither), so the brought feature has the same value in train/play.
+            pos = self.extractor.extract(view, summary, opp_movesets=opp_ms,
+                                         dmg=dmg)
             act = torch.as_tensor(
                 np.stack([my_action_arrays(pos, a, self.vocab) for a in cands]),
                 dtype=torch.long, device=self.device)
@@ -169,12 +170,17 @@ def build_jepa_consequence_chooser(ckpt=None, cfg=CFG, jcfg=JCFG, seed=0):
     if model is None:
         vocab = JEPAVocab.build(cfg)
         model = JEPAConsequenceModel(vocab.sizes(), jcfg, vocab.state()).to(device)
+    # Use the model's own (checkpoint-stored) planner/training knobs so play
+    # matches training -- crucially use_damage_features, which train_consequence
+    # sets from whether the shards actually carried damage edges. Feeding damage
+    # edges the model never trained on would push it off-distribution.
+    mjcfg = model.jcfg
     bridge = None
-    if jcfg.use_damage_features:
+    if getattr(mjcfg, "use_damage_features", False):
         try:
             from damage import DamageBridge
             bridge = DamageBridge(cfg)
         except Exception as exc:
             print(f"[jepa-c] damage bridge unavailable ({exc}); no edges",
                   file=sys.stderr)
-    return JEPAConsequenceChooser(model, vocab, cfg, jcfg, seed, bridge)
+    return JEPAConsequenceChooser(model, vocab, cfg, mjcfg, seed, bridge)

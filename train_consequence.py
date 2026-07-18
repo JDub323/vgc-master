@@ -118,9 +118,13 @@ def train(data_dir, out_path, cfg=CFG, jcfg=JCFG, epochs=None, limit_shards=None
     vstate_p = data_dir / "vocab_state.json"
     vocab = (JEPAVocab.from_state(json.loads(vstate_p.read_text()), load_dex(cfg))
              if vstate_p.exists() else JEPAVocab.build(cfg))
-    model = JEPAConsequenceModel(vocab.sizes(), jcfg, vocab.state()).to(device)
 
     train_paths = sorted(data_dir.glob("train_*.npz")) or sorted(data_dir.glob("*.npz"))
+    # Record whether the shards actually carry damage edges, so the chooser
+    # only builds a damage bridge at play time when the model trained on one.
+    jcfg.use_damage_features = bool(train_paths) and \
+        float(np.abs(np.load(train_paths[0])["cur_dmg"]).max()) > 0
+    model = JEPAConsequenceModel(vocab.sizes(), jcfg, vocab.state()).to(device)
     val_paths = sorted(data_dir.glob("val_*.npz"))
     epochs = epochs or jcfg.epochs
     opt = torch.optim.AdamW(model.parameters(), lr=jcfg.lr,
