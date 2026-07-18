@@ -315,11 +315,90 @@ def test_consequence_training_step():
     assert torch.isfinite(loss) and metrics["total"] > 0
 
 
+def test_scaled_config_builds_and_runs():
+    """The ~6x scaled consequence config forwards and lands in 30M-90M params."""
+    from jepa.config import scaled_consequence
+    from models.jepa_consequence import JEPAConsequenceModel
+    from jepa.features import my_action_arrays
+    vocab = _vocab()
+    sj = scaled_consequence()
+    model = JEPAConsequenceModel(vocab.sizes(), sj, vocab.state())
+    n = sum(p.numel() for p in model.parameters())
+    assert 30e6 < n < 90e6, f"scaled params {n/1e6:.1f}M outside 30-90M"
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    b = _batch([pos], model)
+    z = model.encode(b)
+    act = torch.as_tensor(my_action_arrays(pos, (1, 1), vocab))[None]
+    c = model.consequence(z, act, b["dmg"], None)
+    assert c.shape == (1, sj.d_model)
+    assert model.score(c).shape == (1,)
+
+
+def test_selfplay_losses_backprop():
+    """sp_losses backpropagates; advantage weights are clipped and positive."""
+    from selfplay_jepa import sp_losses
+    from models.jepa_consequence import JEPAConsequenceModel
+    vocab = _vocab()
+    model = JEPAConsequenceModel(vocab.sizes(), JCFG, vocab.state())
+    sizes = vocab.sizes()
+    b, nc = 6, 5
+    rng = np.random.default_rng(1)
+
+    def pos(pref):
+        return {pref + "gcat": torch.stack([
+                    torch.as_tensor(rng.integers(0, len(WEATHERS), b)),
+                    torch.as_tensor(rng.integers(0, len(TERRAINS), b))], 1),
+                pref + "gscal": torch.rand(b, 18),
+                pref + "mcat": torch.stack([torch.as_tensor(
+                    rng.integers(0, min(sizes["species"], 12), (b, 12)))
+                    for _ in range(10)], -1),
+                pref + "mscal": torch.rand(b, 12, N_MON_SCALAR),
+                pref + "dmg": torch.rand(b, 6, 6)}
+    sh = {**pos("cur_"), **pos("nxt_"),
+          "my_act": torch.as_tensor(rng.integers(0, 3, (b, 12, 7))),
+          "cand_acts": torch.as_tensor(rng.integers(0, 3, (b, nc, 12, 7))),
+          "cand_mask": torch.ones(b, nc, dtype=torch.bool),
+          "a_index": torch.zeros(b, dtype=torch.long),
+          "value": torch.as_tensor(
+              (rng.integers(0, 2, b) * 2 - 1).astype("float32")),
+          "weight": torch.ones(b),
+          "has_nxt": torch.tensor([True] * (b - 1) + [False])}
+    for pref in ("cur_", "nxt_"):        # status column must be a valid class
+        sh[pref + "mcat"][..., 7] = torch.as_tensor(
+            rng.integers(0, len(STATUSES), (b, 12)))
+    loss, m = sp_losses(model, sh, JCFG)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert 0 < m["adv_w"] <= JCFG.spj_w_max
+
+
+def test_recorder_sample_from_plan():
+    """RecorderConsequenceBot._sample keeps the chosen action at index 0."""
+    import random as _random
+    from selfplay_jepa import RecorderConsequenceBot
+    vocab = _vocab()
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    acts = np.stack([np.full((12, 7), i, dtype=np.int64) for i in range(20)])
+    plan = {"pos": pos, "cands": list(range(20)), "cand_acts": acts,
+            "chosen": 7, "scores": np.zeros(20), "values": np.zeros(20)}
+    bot = object.__new__(RecorderConsequenceBot)   # skip Bot.__init__ (no sim)
+    bot.eps, bot.exp_rng, bot.n_cand = 0.0, _random.Random(0), 12
+    s = bot._sample(plan, 7)
+    assert s["cand_acts"].shape == (12, 12, 7)
+    assert (s["cand_acts"][0] == acts[7]).all()      # chosen at index 0
+    assert s["a_index"] == 0 and s["cand_mask"].all()
+    rows = {int(s["cand_acts"][j, 0, 0]) for j in range(12)}
+    assert len(rows) == 12                            # negatives are distinct
+
+
 TESTS = [test_features_and_actions, test_model_forward,
          test_solver_finds_mixed_strategy, test_chooser_end_to_end,
          test_training_step_runs, test_legal_my_joints_from_view,
          test_consequence_model_forward, test_consequence_chooser_end_to_end,
-         test_consequence_training_step]
+         test_consequence_training_step, test_scaled_config_builds_and_runs,
+         test_selfplay_losses_backprop, test_recorder_sample_from_plan]
 
 
 if __name__ == "__main__":

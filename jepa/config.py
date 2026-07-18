@@ -77,5 +77,40 @@ class JEPAConfig:
     w_value_c: float = 0.5             # outcome value off the consequence vector
     w_spread: float = 0.05             # luck-latent usage (spread) regularizer
 
+    # ---- consequence self-play (selfplay_jepa.py) ----
+    # jepa-c decides ~300x faster than DUCT because it never touches the sim
+    # at decision time, so self-play is sim-bound: throughput scales with
+    # procs x workers almost linearly until the box runs out of Node processes.
+    spj_games_per_iter: int = 400      # games per generate->train iteration
+    spj_procs: int = 4                 # generator subprocesses (beat the GIL)
+    spj_workers: int = 6               # game threads per process (sim-bound)
+    spj_max_turns: int = 300           # stall cap -> tie (z=0)
+    spj_temp_turns: int = 8            # tau=1 for the first N turns...
+    spj_final_temp: float = 0.35       # ...then this (generation only)
+    spj_eps: float = 0.03              # eps-uniform candidate exploration
+    spj_beta: float = 1.0              # advantage temperature in exp(A/beta)
+    spj_w_max: float = 5.0             # advantage-weight clip (stability)
+    spj_human_mix: float = 0.25        # fraction of human-BC rows mixed per iter
+    spj_buffer_iters: int = 4          # train on the last N iterations' shards
+    spj_epochs: int = 2                # epochs per iteration
+    spj_lr: float = 5e-5               # fine-tune LR (BC used 3e-4 fresh)
+    spj_gate_games: int = 40           # argmax gate current-vs-best per iter
+    spj_gate_keep: float = 0.55        # promote to best at/above this winrate
+    spj_league_every: int = 3          # add current to the league every N iters
+    spj_p_mirror: float = 0.5          # opponent sampling: current model
+    spj_p_league: float = 0.3          # ...a random league checkpoint
+    spj_p_anchor: float = 0.2          # ...the frozen starting anchor
+
 
 JCFG = JEPAConfig()
+
+
+def scaled_consequence(base=None):
+    """A ~6x-parameter consequence config (~50M): richer latents, still fast.
+
+    16 tokens x ~60 candidates per decision keeps inference in single-digit
+    milliseconds on GPU at this size; the self-play bottleneck stays the sim."""
+    import dataclasses
+    return dataclasses.replace(base or JEPAConfig(), d_model=448, d_embed=96,
+                               n_heads=8, n_enc_layers=5, n_cpred_layers=3,
+                               d_ff=1792)

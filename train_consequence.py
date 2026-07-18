@@ -16,7 +16,7 @@ End-to-end objective (see ``JEPA_DESIGN.md`` "Consequence variant"):
     stop-grad asymmetry.
 
 CLI: python train_consequence.py [--data DIR] [--out PATH] [--epochs N]
-                                 [--bs N] [--limit-shards N]
+                                 [--bs N] [--limit-shards N] [--large]
 """
 
 import json
@@ -197,6 +197,9 @@ def main():
         return args[args.index(flag) + 1] if flag in args else default
 
     jcfg = JCFG
+    if "--large" in args:                    # ~6x scaled model (~50M params)
+        from jepa.config import scaled_consequence
+        jcfg = scaled_consequence(jcfg)
     data = opt("--data", str(CFG.artifacts_dir / "jepa_cons_prepped"))
     out = opt("--out", str(CFG.checkpoint_dir / "jepa" / "jepa_consequence.pt"))
     epochs = opt("--epochs")

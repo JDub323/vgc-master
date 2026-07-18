@@ -109,6 +109,34 @@ action-sensitive (distinct consequence vectors per move), and the agent plays
 varied moves instead of a fixed double-switch. **A full re-prep + re-train is
 required** — the old shards baked in the degenerate candidates.
 
+**Tournament result + the scale/self-play iteration (2026-07-18).** The fixed
+full-scale jepa-c (~8M params, trained on 896,649 human transitions) placed
+~5th on the box leaderboard at ~0.01 s/move — roughly DUCT-baseline
+strength at ~300x speed. Since it is BC-trained, that is about the imitation
+ceiling; the next iteration targets *surpassing* it with two additions, both
+implemented on this branch:
+
+1. **~6x scale** (`jepa/config.scaled_consequence`, `train_consequence.py
+   --large`): d448 / 5+3 role-typed layers / ff1792 ≈ 50M params (tested to
+   land in 30–90M). Decision cost stays milliseconds — 16 tokens x ~60
+   candidates.
+2. **Outcome-driven self-play** (`selfplay_jepa.py`). Design rationale: jepa-c
+   never touches the sim per decision, so self-play generation is *sim-bound* —
+   the box that fed DUCT ~150 games/iter can feed jepa-c thousands. The loop is
+   engineered against the known failure modes: advantage-weighted policy CE
+   (weight `clip(exp((z - b)/beta))`, baseline = mean candidate value) instead
+   of self-imitating BC; a league (mirror / past checkpoints / frozen anchor)
+   against strategy cycling; a capped human-BC data mix against meta drift;
+   temperature + eps-uniform exploration in generation only; teams sampled from
+   the ~3k validated pool against pairwise memorization; samples recorded from
+   the chooser's own plan (train=play identity — the bug class that sank the
+   first export); and an argmax gate vs `spj_best` with promotion at >=55%.
+   The JEPA latent loss continues on realized on-policy futures (last decision
+   of a game has no future and is masked). Training half is dry-run-verified
+   end-to-end on a recorder-built buffer; the generation half needs the sim
+   and is untested on the dev laptop (no pokemon-showdown install) — first run
+   on the box should start with `--iters 1 --games 40` as a smoke.
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT

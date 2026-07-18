@@ -750,7 +750,8 @@ New modules (none imported by the frozen trunk agents):
 | `agents/jepa_world_model/v2.py` | `JEPAConsequenceChooser` (`MoveChooser`) + builder: ranks predicted consequence vectors. |
 | `agents/jepa_world_model/v1.py` | `JEPAWorldModelChooser` (`MoveChooser`) + builder: one-ply latent plan + matrix solve. |
 | `jepa_data.py` | Builds transition shards into `artifacts/jepa_prepped` (next-state) or, with `--consequence`, own-move candidate/future shards into `artifacts/jepa_cons_prepped`. Never touches the layout-3 shards. |
-| `train_consequence.py` | Trains the consequence model (JEPA latent loss + policy BC + value + VICReg, EMA target). |
+| `train_consequence.py` | Trains the consequence model (JEPA latent loss + policy BC + value + VICReg, EMA target). `--large` builds the ~6x scaled (~50M) config. |
+| `selfplay_jepa.py` | Outcome-driven self-play for jepa-c: sim-bound parallel generation from the validated team pool, league opponents + frozen anchor, advantage-weighted policy loss with a human-BC mix, per-iteration argmax gate vs the best checkpoint. |
 | `train_jepa.py` | Trains the next-state world model (JEPA latent + value + grounded decoders + policy heads + VICReg, EMA target). |
 
 Run the consequence variant (the intended one):
@@ -767,3 +768,23 @@ python round_robin.py play exp-jepa-c rr-baseline --quick 10
 The next-state variant is the same flow with `jepa_data.py` (no `--consequence`),
 `train_jepa.py`, and `--agent jepa`. Without a checkpoint either agent still runs
 (random-init, legal but weak), so a bundle is always exportable.
+
+Scale up and self-play (the strength path — jepa-c decides ~300x faster than
+DUCT because it never touches the sim per decision, so self-play is sim-bound
+and generation throughput scales with `--procs`/`--workers`):
+
+```bash
+# 1. BC-init the ~6x scaled model (~50M params) on the fixed human shards
+python train_consequence.py --large --data artifacts/jepa_cons_prepped \
+    --out artifacts/checkpoints/jepa/jepa_consequence_l.pt --epochs 6
+
+# 2. outcome-driven self-play (resumable; state under checkpoints/jepa/selfplay)
+python selfplay_jepa.py --from artifacts/checkpoints/jepa/jepa_consequence_l.pt \
+    --hours 12 --games 400 --procs 4 --workers 6
+
+# 3. export the gated best and get a real Elo read
+python export_agent.py exp-jepa-c-sp --agent jepa-c \
+    --ckpt artifacts/checkpoints/jepa/selfplay/spj_best.pt \
+    --architecture JEPA-Consequence
+python round_robin.py play exp-jepa-c-sp rr-baseline --quick 10   # then a full series
+```

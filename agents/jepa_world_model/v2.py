@@ -37,6 +37,11 @@ class JEPAConsequenceChooser:
         self.rng = random.Random(seed)
         self.bridge = bridge
         self.device = next(model.parameters()).device
+        # Self-play recording hook: when True, _plan stashes the exact
+        # position/candidates/scores it acted on in self.last_plan, so
+        # training samples are literally the play-time distribution.
+        self.record = False
+        self.last_plan = None
 
     def choose(self, tracker, belief, my_id, request, brought,
                opp_brought=None, temperature=None, root_noise=None):
@@ -74,15 +79,21 @@ class JEPAConsequenceChooser:
         scores = np.zeros(c, dtype=np.float64)
         values = np.zeros(c, dtype=np.float64)
         passes = 0
+        first_pos, acts_np, act = None, None, None
         for det in dets:
             opp_ms = _movesets(det)
             # brought/opp_brought left as None to match prep (jepa_data passes
             # neither), so the brought feature has the same value in train/play.
             pos = self.extractor.extract(view, summary, opp_movesets=opp_ms,
                                          dmg=dmg)
-            act = torch.as_tensor(
-                np.stack([my_action_arrays(pos, a, self.vocab) for a in cands]),
-                dtype=torch.long, device=self.device)
+            if acts_np is None:
+                # candidate action arrays only fill the OWN side, which does not
+                # vary across determinizations -- build once, reuse every det
+                first_pos = pos
+                acts_np = np.stack(
+                    [my_action_arrays(pos, a, self.vocab) for a in cands])
+                act = torch.as_tensor(acts_np, dtype=torch.long,
+                                      device=self.device)
             batch = self._batch(pos, c)
             z = self.model.encode(batch)
             m = max(1, self.jcfg.ensemble_m if self.jcfg.noise_dim else 1)
@@ -96,6 +107,11 @@ class JEPAConsequenceChooser:
         values /= passes
 
         idx = self._pick(scores, temp)
+        if self.record:
+            # exact play-time distribution for self-play training samples
+            self.last_plan = {"pos": first_pos, "cands": cands,
+                              "cand_acts": acts_np, "chosen": idx,
+                              "scores": scores, "values": values}
         p = _softmax(scores)
         info = {"value": float(values[idx]), "solve": False,
                 "strategy": _decoded(cands, p),
