@@ -10,7 +10,7 @@
 # Tune via env: GENS GAMES ARENA_GAMES WORKERS TEAMS SCENARIOS CANDIDATES
 set -euo pipefail
 cd "$(dirname "$0")/.."
-MAIN="${MAIN:-../vgc-bot}"
+MAIN="${MAIN:-../vgc-master}"
 export VGC_NODE_DIR="${VGC_NODE_DIR:-$(cd "$MAIN" && pwd)/artifacts/node}"
 PY="${PY:-$MAIN/.venv/bin/python}"
 
