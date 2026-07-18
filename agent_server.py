@@ -78,6 +78,9 @@ def build_chooser(kind, ckpt, cfg, seed=0):
     if kind == "max-damage":
         from agents.max_damage.v1 import MaxDamageChooser
         return MaxDamageChooser(cfg)
+    if kind == "bermuda":
+        from bermuda.chooser import BermudaChooser
+        return BermudaChooser(ckpt, cfg, seed=seed)
     if kind in ("search", "policy"):
         import torch
 
@@ -141,8 +144,12 @@ class AgentServer:
                 self.bot.brought = list(range(n))
                 choice = "team " + "".join(str(i + 1) for i in range(n))
             elif req.get("forceSwitch"):
-                from env import random_choice
-                choice = random_choice(req, self.rng)
+                forced = getattr(self.chooser, "forced_choice", None)
+                if forced is not None:
+                    choice = forced(self.bot.tracker, self.bot.side, req)
+                else:
+                    from env import random_choice
+                    choice = random_choice(req, self.rng)
             else:
                 choice, _ = self.bot.decide(req, self.temperature)
         except Exception as exc:   # keep playing; the coordinator tallies it
