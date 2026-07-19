@@ -88,11 +88,15 @@ class JEPAConfig:
     unroll_gamma: float = 0.8          # per-step discount on multi-step JEPA loss
     w_jepa_s: float = 1.0              # latent dynamics prediction loss
     w_policy_s: float = 0.5            # policy CE (mean per head, masked)
-    # Detach the policy heads from the encoder trunk: the heads still train,
-    # but the encoder's representation is shaped by JEPA + value only. The v3
-    # full-scale run showed the summed 39-way CEs dominating the encoder ~20:1
-    # and the dynamics loss RISING all run — the world model must own the trunk.
-    policy_detach: bool = True
+    # Fraction of the policy gradient allowed into the encoder trunk. 1.0
+    # reproduces stage 1 (policy CEs conquered the encoder, JEPA loss rose all
+    # run); 0.0 reproduces stage 2's full detach (policy collapsed to my_acc
+    # 0.14 — a linear head on frozen features is too weak, and the mushy prior
+    # let the value head's off-policy bias run the anchored solve into
+    # 0-for-17 degenerate play). 0.1 lets the heads shape features without
+    # owning them; the heads themselves are MLPs so they can also learn on
+    # mostly-frozen features.
+    policy_grad_scale: float = 0.1
     w_value_s: float = 0.5             # margin-distribution CE off encoded + unrolled
     n_margin_bins: int = 9             # final mon differential -4..+4
     plan_depth: int = 1                # play-time latent search depth (1 or 2)
@@ -100,10 +104,11 @@ class JEPAConfig:
     top_k_opp_s: int = 6               # root candidate width, opponent side
     child_k: int = 4                   # per-side candidate width at depth >= 2
     # Prior-anchored equilibrium: p ∝ prior·exp(eta·Mq). eta -> 0 plays the
-    # policy prior; eta -> inf approaches Nash on the value matrix. Keeps the
-    # decision anchored to the strong BC prior wherever value differences are
-    # inside the value head's noise floor (the v3 stage-1 regression cause).
-    solver_eta: float = 4.0
+    # policy prior; eta -> inf approaches Nash on the value matrix. The payoff
+    # matrix is STANDARDIZED (per-decision mean/std) inside the solve, so eta
+    # is in units of that decision's own value spread — a miscalibrated value
+    # head cannot buy influence just by being confidently spread out.
+    solver_eta: float = 1.5
 
     # ---- consequence self-play (selfplay_jepa.py) ----
     # jepa-c decides ~300x faster than DUCT because it never touches the sim

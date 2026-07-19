@@ -760,7 +760,8 @@ New modules (none imported by the frozen trunk agents):
 | `selfplay_jepa.py` | Outcome-driven self-play for jepa-c: sim-bound parallel generation from the validated team pool, league opponents + frozen anchor, advantage-weighted policy loss with a human-BC mix, per-iteration argmax gate vs the best checkpoint. |
 | `models/jepa_strategy.py` | v3 stage 1: `JEPAStrategyModel` — recursive latent dynamics `T(Z, a, b)`, policy/value heads, EMA target (`JEPA_V3_DESIGN.md`). |
 | `agents/jepa_world_model/v3.py` | `JEPAStrategyChooser` (`MoveChooser`, kind `jepa-s`): depth-1 latent matrix solve; depth-2 recursion through `T` with switch-propagated active maps. |
-| `train_strategy.py` | Trains the v3 dynamics with discounted multi-step JEPA unrolls + policy/value heads + VICReg on `--seq` window shards. |
+| `train_strategy.py` | Trains the v3 dynamics with discounted multi-step JEPA unrolls + policy/value heads (gradient-scaled into the trunk) + VICReg on `--seq` window shards. |
+| `probe_strategy.py` | Pre-game sanity probes for a v3 checkpoint: counterfactual value ranking (decides how much `solver_eta` the value head has earned), value calibration by outcome, and policy top-1/3. |
 | `train_jepa.py` | Trains the next-state world model (JEPA latent + value + grounded decoders + policy heads + VICReg, EMA target). |
 
 Run the consequence variant (the intended one):

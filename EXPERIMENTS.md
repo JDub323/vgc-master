@@ -174,6 +174,28 @@ expectation), and **densified windows** (stride 1 + unbroken chains).
 Requires re-running `jepa_data.py --seq` and `train_strategy.py --large`
 (shard schema + head shapes changed).
 
+**Stage-2 full-scale result (2026-07-20): still broken — overcorrection
+diagnosed.** 1.12M windows trained cleanly (jepa 0.39 -> 0.23 falling, the
+stage-1 pathology fixed; margin CE 1.25 -> 0.84) but the exported agent
+started ~1-for-17 vs bermuda, losing across all matchups incl. mirrors —
+systematically degenerate play. Cause: the full policy detach starved the
+heads (a single Linear on frozen features; my_acc 0.14 vs stage-1's 0.23), so
+BOTH the candidate pruning and the prior anchor went mushy, while the
+now-confident value head steered `exp(4·Δv)` with its **off-policy bias** —
+the matrix queries 36 counterfactual (a,b) pairs the value was never grounded
+on. Fixes: (1) `policy_grad_scale=0.1` (gradient-scaled trunk access, not
+detach) + MLP policy heads over CLS+pooled side summaries; (2) the anchored
+solve now **standardizes** the payoff matrix per decision, so `solver_eta`
+(default 1.5) is in units of that decision's own value spread — confidence
+alone buys no influence; (3) `probe_strategy.py` measures the value head's
+counterfactual ranking (v(T(z,a_true,b)) vs swapped own-actions) *before*
+games: ~0.5 = no off-policy signal, keep eta near 0 and play the prior;
+run it after every train, and pass `--eta`-adjusted exports accordingly.
+The durable lesson for the record: a payoff matrix built from a value head
+that was only ever supervised on the human-taken action is exploitable by
+construction — counterfactual (what-if sim) grounding is not an optional
+stage-3 nicety, it is what makes value-led decisions legitimate.
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT

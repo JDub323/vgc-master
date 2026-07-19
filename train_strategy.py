@@ -61,18 +61,18 @@ def _masked_ce(logits, target, mask):
 def losses(model, sh, jcfg):
     """Multi-step JEPA + policy + margin-value losses for one window batch.
 
-    Encoder-trunk ownership: the policy heads read a DETACHED z0 by default
-    (``policy_detach``), so the representation is shaped by the dynamics and
-    value objectives — the stage-1 full run showed the summed policy CEs
-    dominating the trunk while the JEPA loss rose. Policy CE is a mean per
-    head (not a sum) and masked to observed actions (AK_UNK steps train the
-    dynamics but never the policy)."""
+    Encoder-trunk ownership: the policy heads receive only
+    ``policy_grad_scale`` of their gradient into the trunk — 1.0 let the
+    policy CEs conquer the encoder in stage 1 (JEPA loss rose all run), 0.0
+    starved the heads in stage 2 (my_acc collapsed to 0.14). Policy CE is a
+    mean per head (not a sum) and masked to observed actions (AK_UNK steps
+    train the dynamics but never the policy)."""
     K = sh["act"].shape[1]
     z0 = model.encode(_pos_at(sh, 0))
 
     # policy heads at the window start (stride-1 windows cover every offset)
-    z0p = z0.detach() if jcfg.policy_detach else z0
-    my_logits, opp_logits = model.policies(z0p)
+    my_logits, opp_logits = model.policies(z0,
+                                           grad_scale=jcfg.policy_grad_scale)
     am, bm = sh["a_mask"][:, 0], sh["b_mask"][:, 0]
     pol_l = (_masked_ce(my_logits[:, 0], sh["a_slot"][:, 0, 0], am)
              + _masked_ce(my_logits[:, 1], sh["a_slot"][:, 0, 1], am)

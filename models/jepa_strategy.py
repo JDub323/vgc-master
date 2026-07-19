@@ -73,6 +73,26 @@ class Dynamics(nn.Module):
         return self.out_norm(x)
 
 
+class _GradScale(torch.autograd.Function):
+    """Identity forward; multiply the backward gradient by a constant."""
+
+    @staticmethod
+    def forward(ctx, x, scale):
+        """Pass ``x`` through unchanged, remembering ``scale``."""
+        ctx.scale = scale
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        """Return the incoming gradient scaled by the stored constant."""
+        return grad * ctx.scale, None
+
+
+def _scale_grad(x, scale):
+    """Gradient-scaled identity (0 = full detach, 1 = full gradient)."""
+    return _GradScale.apply(x, scale)
+
+
 class JEPAStrategyModel(nn.Module):
     """Encoder + recursive dynamics + policy/value heads + EMA target."""
 
@@ -88,8 +108,14 @@ class JEPAStrategyModel(nn.Module):
         for p in self.target_encoder.parameters():
             p.requires_grad_(False)
         self.dynamics = Dynamics(self.encoder.embedder, jcfg)
-        self.my_prior = nn.Linear(d, 2 * N_SLOT_ACTIONS)
-        self.opp_policy = nn.Linear(d, 2 * N_SLOT_ACTIONS)
+        # MLP policy heads (a single Linear on mostly-frozen features was too
+        # weak: stage-2 my_acc collapsed to 0.14 under full detach). They read
+        # CLS + a pooled side summary and receive only ``policy_grad_scale``
+        # of their gradient into the trunk.
+        self.my_prior = nn.Sequential(
+            nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 2 * N_SLOT_ACTIONS))
+        self.opp_policy = nn.Sequential(
+            nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 2 * N_SLOT_ACTIONS))
         # distributional value: categorical over the final mon differential
         # (-4..+4); the scalar value is its expectation in [-1, 1]
         self.margin_head = nn.Linear(d, jcfg.n_margin_bins)
@@ -125,11 +151,20 @@ class JEPAStrategyModel(nn.Module):
         p = torch.softmax(self.margin_logits(z), -1)
         return (p * self.margin_bins).sum(-1)
 
-    def policies(self, z):
-        """Return ``(my_prior, opp_policy)`` slot logits ``[B, 2, 39]``."""
-        cls, intent = z[:, CLS_TOK], z[:, 13:15].mean(1)
-        my = self.my_prior(cls).view(-1, 2, N_SLOT_ACTIONS)
-        opp = self.opp_policy(intent).view(-1, 2, N_SLOT_ACTIONS)
+    def policies(self, z, grad_scale=None):
+        """Return ``(my_prior, opp_policy)`` slot logits ``[B, 2, 39]``.
+
+        ``grad_scale`` (training only) scales the gradient flowing from the
+        policy heads back into the encoder trunk; forward is unchanged."""
+        if grad_scale is not None:
+            z = _scale_grad(z, grad_scale)
+        cls = z[:, CLS_TOK]
+        ally = z[:, ALLY0:ALLY0 + 6].mean(1)
+        intent = z[:, 13:15].mean(1)
+        my = self.my_prior(torch.cat([cls, ally], -1)) \
+            .view(-1, 2, N_SLOT_ACTIONS)
+        opp = self.opp_policy(torch.cat([cls, intent], -1)) \
+            .view(-1, 2, N_SLOT_ACTIONS)
         return my, opp
 
     @torch.no_grad()

@@ -480,10 +480,19 @@ def test_strategy_training_step():
     loss, m = losses(model, sh, JCFG)
     loss.backward()
     assert torch.isfinite(loss) and m["jepa"] > 0
-    # policy heads are detached from the trunk by default: policy CE must not
-    # push gradient into the encoder (embedder table grad comes from JEPA path
-    # only — verified by zeroing policy weight changing nothing about it)
-    assert JCFG.policy_detach
+    assert 0.0 < JCFG.policy_grad_scale < 1.0     # partial trunk gradient
+
+
+def test_policy_grad_scale():
+    """grad_scale scales the encoder-bound gradient without changing forward."""
+    from models.jepa_strategy import _scale_grad
+    x = torch.randn(2, 4, requires_grad=True)
+    y_full = _scale_grad(x, 1.0).sum()
+    g_full = torch.autograd.grad(y_full, x)[0]
+    y_tenth = _scale_grad(x, 0.1).sum()
+    g_tenth = torch.autograd.grad(y_tenth, x)[0]
+    assert torch.allclose(g_tenth, 0.1 * g_full)
+    assert torch.allclose(_scale_grad(x, 0.1), x)  # forward is identity
 
 
 def test_anchored_solver():
@@ -531,8 +540,8 @@ TESTS = [test_features_and_actions, test_model_forward,
          test_consequence_training_step, test_scaled_config_builds_and_runs,
          test_selfplay_losses_backprop, test_recorder_sample_from_plan,
          test_strategy_dynamics_recursion, test_seq_windows_shapes,
-         test_strategy_training_step, test_anchored_solver,
-         test_strategy_chooser_depths]
+         test_strategy_training_step, test_policy_grad_scale,
+         test_anchored_solver, test_strategy_chooser_depths]
 
 
 if __name__ == "__main__":
