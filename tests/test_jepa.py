@@ -393,12 +393,109 @@ def test_recorder_sample_from_plan():
     assert len(rows) == 12                            # negatives are distinct
 
 
+def test_strategy_dynamics_recursion():
+    """T maps latents to latents and composes: T(T(Z,a0,b0),a1,b1) works."""
+    from models.jepa_strategy import JEPAStrategyModel
+    vocab = _vocab()
+    model = JEPAStrategyModel(vocab.sizes(), JCFG, vocab.state())
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    b = _batch([pos], model)
+    z = model.encode(b)
+    from jepa.features import action_arrays
+    act = torch.as_tensor(action_arrays(pos, (1, 1), (1, 1), vocab))[None]
+    z1 = model.step(z, act, b["dmg"])
+    assert z1.shape == z.shape
+    z2 = model.step(z1, act, None)          # recursion, no damage bias
+    assert z2.shape == z.shape
+    assert model.value(z2).shape == (1,)
+    my, opp = model.policies(z1)
+    assert my.shape == (1, 2, 39) and opp.shape == (1, 2, 39)
+    assert not torch.allclose(z1, z2)       # dynamics actually moves latents
+
+
+def test_seq_windows_shapes():
+    """--seq prep emits padded windows with a correct n_steps mask."""
+    from jepa_data import _seq_windows
+    vocab = _vocab()
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    steps = [(pos, None, (1, 1), (1, 1)) for _ in range(8)]
+    steps.insert(4, (pos, None, None, (1, 1)))      # chain break
+    wins = list(_seq_windows(steps, 1, 1.0, vocab))
+    assert wins, "no windows emitted"
+    for s in wins:
+        K = s["act"].shape[0]
+        assert s["pos_mcat"].shape[0] == K + 1
+        m = int(s["n_steps"])
+        assert 1 <= m <= K
+        # padded steps beyond n_steps stay zero
+        if m < K:
+            assert not s["act"][m:].any()
+
+
+def test_strategy_training_step():
+    """Multi-step JEPA + policy + value losses backprop on a synthetic window."""
+    from train_strategy import losses
+    from models.jepa_strategy import JEPAStrategyModel
+    vocab = _vocab()
+    model = JEPAStrategyModel(vocab.sizes(), JCFG, vocab.state())
+    sizes = vocab.sizes()
+    b, K = 4, JCFG.seq_len
+    rng = np.random.default_rng(2)
+    sh = {"pos_gcat": torch.stack([torch.stack([
+              torch.as_tensor(rng.integers(0, len(WEATHERS), b)),
+              torch.as_tensor(rng.integers(0, len(TERRAINS), b))], -1)
+              for _ in range(K + 1)], 1),
+          "pos_gscal": torch.rand(b, K + 1, 18),
+          "pos_mcat": torch.stack([torch.as_tensor(
+              rng.integers(0, min(sizes["species"], 12), (b, 12, 10)))
+              for _ in range(K + 1)], 1),
+          "pos_mscal": torch.rand(b, K + 1, 12, N_MON_SCALAR),
+          "pos_dmg": torch.rand(b, K + 1, 6, 6),
+          "act": torch.as_tensor(rng.integers(0, 3, (b, K, 12, 7))),
+          "a_slot": torch.as_tensor(rng.integers(0, 39, (b, K, 2))),
+          "b_slot": torch.as_tensor(rng.integers(0, 39, (b, K, 2))),
+          "n_steps": torch.tensor([K, 3, 1, 2]),
+          "value": torch.as_tensor(
+              (rng.integers(0, 2, b) * 2 - 1).astype("float32")),
+          "weight": torch.ones(b)}
+    sh["pos_mcat"][..., 7] = torch.as_tensor(
+        rng.integers(0, len(STATUSES), (b, K + 1, 12)))
+    loss, m = losses(model, sh, JCFG)
+    loss.backward()
+    assert torch.isfinite(loss) and m["jepa"] > 0
+
+
+def test_strategy_chooser_depths():
+    """The v3 chooser returns legal actions and info at depth 1 and depth 2."""
+    import dataclasses
+    from agents.jepa_world_model.v3 import JEPAStrategyChooser
+    from models.jepa_strategy import JEPAStrategyModel
+    vocab = _vocab()
+    model = JEPAStrategyModel(vocab.sizes(), JCFG, vocab.state())
+    tracker, belief, request, _ = _mock_battle(vocab)
+    for depth in (1, 2):
+        jc = dataclasses.replace(JCFG, plan_depth=depth)
+        chooser = JEPAStrategyChooser(model, vocab, CFG, jc, seed=0,
+                                      bridge=None)
+        joint, info = chooser.choose(tracker, belief, "p1", request,
+                                     [0, 1, 2, 3], temperature=0.0)
+        assert isinstance(joint, tuple) and len(joint) == 2
+        assert info["strategy"][0][0] != "fallback:first-legal"
+        assert info["health"]["depth"] == depth
+        from actions import joint_choice
+        assert joint_choice(request, joint, {f"Mon{k}": k for k in range(6)})
+
+
 TESTS = [test_features_and_actions, test_model_forward,
          test_solver_finds_mixed_strategy, test_chooser_end_to_end,
          test_training_step_runs, test_legal_my_joints_from_view,
          test_consequence_model_forward, test_consequence_chooser_end_to_end,
          test_consequence_training_step, test_scaled_config_builds_and_runs,
-         test_selfplay_losses_backprop, test_recorder_sample_from_plan]
+         test_selfplay_losses_backprop, test_recorder_sample_from_plan,
+         test_strategy_dynamics_recursion, test_seq_windows_shapes,
+         test_strategy_training_step, test_strategy_chooser_depths]
 
 
 if __name__ == "__main__":

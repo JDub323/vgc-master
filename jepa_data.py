@@ -13,9 +13,12 @@ Writes to a NEW directory (default ``artifacts/jepa_prepped``); it never touches
 the layout-3 shards under ``artifacts/prepped``.
 
 The default (world-model) payload feeds ``train_jepa.py``; ``--consequence``
-emits the own-move candidate/future payload that feeds ``train_consequence.py``.
+emits the own-move candidate/future payload for ``train_consequence.py``;
+``--seq`` emits padded consecutive-transition windows (positions + both-sides
+actions) for the v3 multi-step dynamics trainer ``train_strategy.py``.
 
-CLI: python jepa_data.py [--out DIR] [--limit N] [--damage] [--consequence]
+CLI: python jepa_data.py [--out DIR] [--limit N] [--damage]
+                         [--consequence | --seq]
 """
 
 import random
@@ -143,6 +146,9 @@ def _battle_steps(rec, p, opp, belief, extractor, vocab, opp_ms, outcome, w,
             steps.append((pos, state, acts[p] if acts else None,
                           acts[opp] if acts else None))
         belief.update(turn["events"], viewer=p)
+    if mode == "seq":
+        yield from _seq_windows(steps, outcome, w, vocab)
+        return
     for i in range(len(steps) - 1):
         pos, state, a, b = steps[i]
         nxt = steps[i + 1][0]
@@ -154,6 +160,62 @@ def _battle_steps(rec, p, opp, belief, extractor, vocab, opp_ms, outcome, w,
             if a is None or b is None:
                 continue
             yield _wm_sample(pos, nxt, a, b, outcome, w, vocab)
+
+
+def _seq_windows(steps, outcome, w, vocab, jcfg=JCFG):
+    """Yield v3 sequence windows: K actions + K+1 positions, padded + masked.
+
+    Multi-step JEPA unrolls need consecutive chains of fully-labelled turns.
+    Runs are maximal sublists where both sides' actions are known; each run
+    emits windows every ``seq_stride`` steps, padded to ``seq_len`` with
+    ``n_steps`` recording the valid transition count."""
+    K = jcfg.seq_len
+    runs, cur = [], []
+    for pos, _state, a, b in steps:
+        if a is None or b is None:             # unlabelled turn breaks the chain
+            if len(cur) > 1:
+                runs.append(cur)
+            cur = []
+        else:
+            cur.append((pos, a, b))
+    if len(cur) > 1:
+        runs.append(cur)
+    for run in runs:
+        for i in range(0, len(run) - 1, jcfg.seq_stride):
+            m = min(K, len(run) - 1 - i)
+            if m < 1:
+                break
+            yield _seq_sample(run[i:i + m + 1], m, K, outcome, w, vocab)
+
+
+def _seq_sample(chunk, m, K, outcome, w, vocab):
+    """Build one padded window sample from ``m`` transitions (m <= K)."""
+    p0 = chunk[0][0]
+    gcat = np.zeros((K + 1, 2), dtype=np.int16)
+    gscal = np.zeros((K + 1,) + p0.global_scalar.shape, dtype=np.float32)
+    mcat = np.zeros((K + 1,) + p0.mon_cat.shape, dtype=np.int16)
+    mscal = np.zeros((K + 1,) + p0.mon_scalar.shape, dtype=np.float32)
+    dmg = np.zeros((K + 1, 6, 6), dtype=np.float32)
+    act = np.zeros((K, 12, 7), dtype=np.int16)
+    a_slot = np.zeros((K, 2), dtype=np.int16)
+    b_slot = np.zeros((K, 2), dtype=np.int16)
+    for k in range(m + 1):
+        pos = chunk[k][0]
+        gcat[k] = pos.global_cat
+        gscal[k] = pos.global_scalar
+        mcat[k] = pos.mon_cat
+        mscal[k] = pos.mon_scalar
+        dmg[k] = pos.dmg_edge
+    for k in range(m):
+        pos, a, b = chunk[k]
+        act[k] = action_arrays(pos, a, b, vocab)
+        a_slot[k] = a
+        b_slot[k] = b
+    return {"pos_gcat": gcat, "pos_gscal": gscal, "pos_mcat": mcat,
+            "pos_mscal": mscal, "pos_dmg": dmg, "act": act,
+            "a_slot": a_slot, "b_slot": b_slot,
+            "n_steps": np.int16(m), "value": np.int8(outcome),
+            "weight": np.float32(w)}
 
 
 def _cur_nxt(pos, nxt, outcome, w):
@@ -208,9 +270,10 @@ def main():
         """Return the token after ``flag`` in argv, else ``default``."""
         return args[args.index(flag) + 1] if flag in args else default
 
-    mode = "consequence" if "--consequence" in args else "wm"
-    default_out = ("jepa_cons_prepped" if mode == "consequence"
-                   else "jepa_prepped")
+    mode = ("consequence" if "--consequence" in args
+            else "seq" if "--seq" in args else "wm")
+    default_out = {"consequence": "jepa_cons_prepped",
+                   "seq": "jepa_seq_prepped"}.get(mode, "jepa_prepped")
     out = opt("--out", str(CFG.artifacts_dir / default_out))
     limit = opt("--limit")
     prep(out, limit=int(limit) if limit else None,

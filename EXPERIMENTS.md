@@ -137,6 +137,21 @@ implemented on this branch:
    and is untested on the dev laptop (no pokemon-showdown install) — first run
    on the box should start with `--iters 1 --games 40` as a smoke.
 
+**Self-play regression + v3 stage 1 (2026-07-19).** 240+ iterations of the
+v2 self-play loop made the agent *worse* externally: 38% -> 15% vs `bermuda`
+(elo -85 -> -301) while the internal gate promoted steadily. Post-mortem in
+`JEPA_V3_DESIGN.md` §1 (no improvement operator; whole-game credit; noisy
+self-referential gate ratchet; 5-turn game collapse visible in samples/games).
+Stage 1 of the redesign is implemented on this branch: recursive latent
+dynamics `T(Z, a, b)` (`models/jepa_strategy.py`), multi-step JEPA training on
+consecutive-transition windows (`jepa_data.py --seq`, `train_strategy.py`),
+and the `jepa-s` chooser (`agents/jepa_world_model/v3.py`) — a depth-1 latent
+matrix solve with depth-2 recursion available (`plan_depth`), the future
+generation-time improvement operator. Laptop-validated (unit tests + smoke
+prep/train below); big-box train + anchor series pending. Stages 2-4 (TD(λ) +
+distributional value + SPRT anchor gate; trajectory encoder + strategy
+bottleneck; what-if targets + exploiters) are specified in the design doc.
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT

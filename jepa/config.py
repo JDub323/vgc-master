@@ -77,6 +77,21 @@ class JEPAConfig:
     w_value_c: float = 0.5             # outcome value off the consequence vector
     w_spread: float = 0.05             # luck-latent usage (spread) regularizer
 
+    # ---- v3 Strategy-JEPA stage 1 (models/jepa_strategy.py) ----
+    # Recursive latent dynamics T(Z, a, b) trained with multi-step JEPA
+    # unrolls on sequence windows; play is a depth-`plan_depth` latent
+    # matrix-tree search (depth 1 = v1-style one-ply matrix at v2 speed).
+    seq_len: int = 5                   # actions per training window (positions = +1)
+    seq_stride: int = 3                # window stride over each labelled run
+    unroll_gamma: float = 0.8          # per-step discount on multi-step JEPA loss
+    w_jepa_s: float = 1.0              # latent dynamics prediction loss
+    w_policy_s: float = 0.5            # my-prior + opp-policy CE at window start
+    w_value_s: float = 0.5             # outcome value off encoded + unrolled latents
+    plan_depth: int = 1                # play-time latent search depth (1 or 2)
+    top_k_mine_s: int = 6              # root candidate width, own side
+    top_k_opp_s: int = 6               # root candidate width, opponent side
+    child_k: int = 4                   # per-side candidate width at depth >= 2
+
     # ---- consequence self-play (selfplay_jepa.py) ----
     # jepa-c decides ~300x faster than DUCT because it never touches the sim
     # at decision time, so self-play is sim-bound: throughput scales with

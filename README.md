@@ -736,6 +736,12 @@ edits outside the experiment's own tree are two additive kinds in
 - **Next-state variant (kind `jepa`).** Predicts next-state latents for every
   `(mine, opponent)` joint pair and solves that payoff matrix into a mixed
   strategy. Kept and runnable, but not the consequence formulation.
+- **Strategy variant (kind `jepa-s`, v3 stage 1 — see `JEPA_V3_DESIGN.md`).**
+  A *recursive* latent dynamics `T(Z, a, b) -> Z'` trained with multi-step
+  JEPA unrolls on trajectory windows; play is a depth-1 latent matrix solve
+  (depth-2 recursion available via `JEPAConfig.plan_depth`). This is the
+  post-self-play-regression redesign: the dynamics core that later stages'
+  improvement-operator search and strategy bottleneck build on.
 
 New modules (none imported by the frozen trunk agents):
 
@@ -752,6 +758,9 @@ New modules (none imported by the frozen trunk agents):
 | `jepa_data.py` | Builds transition shards into `artifacts/jepa_prepped` (next-state) or, with `--consequence`, own-move candidate/future shards into `artifacts/jepa_cons_prepped`. Never touches the layout-3 shards. |
 | `train_consequence.py` | Trains the consequence model (JEPA latent loss + policy BC + value + VICReg, EMA target). `--large` builds the ~6x scaled (~50M) config. |
 | `selfplay_jepa.py` | Outcome-driven self-play for jepa-c: sim-bound parallel generation from the validated team pool, league opponents + frozen anchor, advantage-weighted policy loss with a human-BC mix, per-iteration argmax gate vs the best checkpoint. |
+| `models/jepa_strategy.py` | v3 stage 1: `JEPAStrategyModel` — recursive latent dynamics `T(Z, a, b)`, policy/value heads, EMA target (`JEPA_V3_DESIGN.md`). |
+| `agents/jepa_world_model/v3.py` | `JEPAStrategyChooser` (`MoveChooser`, kind `jepa-s`): depth-1 latent matrix solve; depth-2 recursion through `T` with switch-propagated active maps. |
+| `train_strategy.py` | Trains the v3 dynamics with discounted multi-step JEPA unrolls + policy/value heads + VICReg on `--seq` window shards. |
 | `train_jepa.py` | Trains the next-state world model (JEPA latent + value + grounded decoders + policy heads + VICReg, EMA target). |
 
 Run the consequence variant (the intended one):
@@ -768,6 +777,17 @@ python round_robin.py play exp-jepa-c rr-baseline --quick 10
 The next-state variant is the same flow with `jepa_data.py` (no `--consequence`),
 `train_jepa.py`, and `--agent jepa`. Without a checkpoint either agent still runs
 (random-init, legal but weak), so a bundle is always exportable.
+
+v3 stage 1 (recursive dynamics; the redesign after the self-play regression):
+
+```bash
+python jepa_data.py --seq                          # trajectory-window shards
+python train_strategy.py --large --data artifacts/jepa_seq_prepped \
+    --out artifacts/checkpoints/jepa/jepa_strategy_l.pt --epochs 6
+python export_agent.py exp-jepa-s --agent jepa-s \
+    --ckpt artifacts/checkpoints/jepa/jepa_strategy_l.pt --architecture JEPA-Strategy
+python round_robin.py play exp-jepa-s rr-baseline --quick 10
+```
 
 Scale up and self-play (the strength path — jepa-c decides ~300x faster than
 DUCT because it never touches the sim per decision, so self-play is sim-bound

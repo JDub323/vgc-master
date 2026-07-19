@@ -84,6 +84,9 @@ def build_chooser(kind, ckpt, cfg, seed=0):
     if kind == "jepa-c":
         from agents.jepa_world_model.v2 import build_jepa_consequence_chooser
         return build_jepa_consequence_chooser(ckpt, cfg, seed=seed)
+    if kind == "jepa-s":
+        from agents.jepa_world_model.v3 import build_jepa_strategy_chooser
+        return build_jepa_strategy_chooser(ckpt, cfg, seed=seed)
     if kind in ("search", "policy"):
         import torch
 
