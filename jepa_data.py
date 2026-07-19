@@ -165,30 +165,44 @@ def _battle_steps(rec, p, opp, belief, extractor, vocab, opp_ms, outcome, w,
 def _seq_windows(steps, outcome, w, vocab, jcfg=JCFG):
     """Yield v3 sequence windows: K actions + K+1 positions, padded + masked.
 
-    Multi-step JEPA unrolls need consecutive chains of fully-labelled turns.
-    Runs are maximal sublists where both sides' actions are known; each run
-    emits windows every ``seq_stride`` steps, padded to ``seq_len`` with
-    ``n_steps`` recording the valid transition count."""
+    Turns whose actions are unobservable (flinch/sleep/KO'd before acting) do
+    NOT break the chain: their action arrays carry ``AK_UNK`` markers and the
+    per-step ``a_mask``/``b_mask`` excludes them from policy supervision, so
+    the dynamics learns the marginal transition and every battle contributes
+    one unbroken trajectory. Windows start every ``seq_stride`` steps, padded
+    to ``seq_len`` with ``n_steps`` recording the valid transition count.
+    ``margin`` is the final mon differential (winner-consistent, from the last
+    observed snapshot)."""
     K = jcfg.seq_len
-    runs, cur = [], []
-    for pos, _state, a, b in steps:
-        if a is None or b is None:             # unlabelled turn breaks the chain
-            if len(cur) > 1:
-                runs.append(cur)
-            cur = []
-        else:
-            cur.append((pos, a, b))
-    if len(cur) > 1:
-        runs.append(cur)
-    for run in runs:
-        for i in range(0, len(run) - 1, jcfg.seq_stride):
-            m = min(K, len(run) - 1 - i)
-            if m < 1:
-                break
-            yield _seq_sample(run[i:i + m + 1], m, K, outcome, w, vocab)
+    run = [(pos, a, b) for pos, _state, a, b in steps]
+    if len(run) < 2:
+        return
+    margin = _final_margin(steps, outcome)
+    for i in range(0, len(run) - 1, jcfg.seq_stride):
+        m = min(K, len(run) - 1 - i)
+        if m < 1:
+            break
+        yield _seq_sample(run[i:i + m + 1], m, K, outcome, w, margin, vocab)
 
 
-def _seq_sample(chunk, m, K, outcome, w, vocab):
+def _final_margin(steps, outcome):
+    """Winner-consistent final mon differential in ``[-4, 4]``.
+
+    Computed from the last observed snapshot (opp fainted − my fainted); the
+    final KO may postdate it, so the sign is forced to agree with the game
+    outcome (a winner has margin >= +1, a loser <= -1)."""
+    last = steps[-1][1]
+    my_f = sum(m["fainted"] for m in last["my"]["team"])
+    opp_f = sum(m["fainted"] for m in last["opp"]["team"])
+    margin = max(-4, min(4, opp_f - my_f))
+    if outcome > 0:
+        margin = max(1, margin)
+    elif outcome < 0:
+        margin = min(-1, margin)
+    return margin
+
+
+def _seq_sample(chunk, m, K, outcome, w, margin, vocab):
     """Build one padded window sample from ``m`` transitions (m <= K)."""
     p0 = chunk[0][0]
     gcat = np.zeros((K + 1, 2), dtype=np.int16)
@@ -199,6 +213,8 @@ def _seq_sample(chunk, m, K, outcome, w, vocab):
     act = np.zeros((K, 12, 7), dtype=np.int16)
     a_slot = np.zeros((K, 2), dtype=np.int16)
     b_slot = np.zeros((K, 2), dtype=np.int16)
+    a_mask = np.zeros(K, dtype=bool)
+    b_mask = np.zeros(K, dtype=bool)
     for k in range(m + 1):
         pos = chunk[k][0]
         gcat[k] = pos.global_cat
@@ -209,13 +225,18 @@ def _seq_sample(chunk, m, K, outcome, w, vocab):
     for k in range(m):
         pos, a, b = chunk[k]
         act[k] = action_arrays(pos, a, b, vocab)
-        a_slot[k] = a
-        b_slot[k] = b
+        if a is not None:
+            a_slot[k] = a
+            a_mask[k] = True
+        if b is not None:
+            b_slot[k] = b
+            b_mask[k] = True
     return {"pos_gcat": gcat, "pos_gscal": gscal, "pos_mcat": mcat,
             "pos_mscal": mscal, "pos_dmg": dmg, "act": act,
             "a_slot": a_slot, "b_slot": b_slot,
+            "a_mask": a_mask, "b_mask": b_mask,
             "n_steps": np.int16(m), "value": np.int8(outcome),
-            "weight": np.float32(w)}
+            "margin": np.int8(margin), "weight": np.float32(w)}
 
 
 def _cur_nxt(pos, nxt, outcome, w):

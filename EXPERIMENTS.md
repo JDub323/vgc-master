@@ -152,6 +152,28 @@ prep/train below); big-box train + anchor series pending. Stages 2-4 (TD(λ) +
 distributional value + SPRT anchor gate; trajectory encoder + strategy
 bottleneck; what-if targets + exploiters) are specified in the design doc.
 
+**Stage-1 full-scale result and the stage-2 fix set (2026-07-19).** The first
+big-box `jepa-s` train (215k windows, 6 epochs) scored **18% vs bermuda** —
+worse than v2's 38%. Three diagnosed causes, all visible in the training log:
+(1) the JEPA dynamics loss ROSE every epoch (0.24 -> 0.34) because the summed
+39-way policy CEs dominated the shared encoder ~20:1; (2) the value head
+(MSE plateau ~0.8, barely better than predicting 0) was the *sole* decision
+criterion — the matrix solve amplified value noise while the decent policy
+head was demoted to candidate pruning; (3) seq data was ~4x thinner than v2's
+(both-actions requirement + chain breaks on the ~24% unobservable-slot turns
++ stride 3). Fixes landed on this branch: **unknown-action marginalization**
+(`AK_UNK` action kind — unobservable turns no longer break chains; the
+dynamics learns the marginal transition, policy CE masks those steps via
+`a_mask`/`b_mask`), **prior-anchored equilibrium** (`solve_matrix_anchored`:
+p ∝ prior·exp(eta·Mq); eta->0 plays the BC prior, eta->inf plays Nash on the
+value matrix — the value head only moves decisions where its differences beat
+its noise floor), **encoder-trunk ownership** (`policy_detach=True`: policy
+heads read a detached z0; per-head-mean masked CE), **distributional margin
+value** (9-bin final-mon-differential CE, winner-consistent labels; scalar =
+expectation), and **densified windows** (stride 1 + unbroken chains).
+Requires re-running `jepa_data.py --seq` and `train_strategy.py --large`
+(shard schema + head shapes changed).
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT

@@ -50,3 +50,37 @@ def _match(regret):
     pos = np.maximum(regret, 0.0)
     s = pos.sum()
     return pos / s if s > 0 else np.ones_like(regret) / len(regret)
+
+
+def solve_matrix_anchored(m, prior_row, prior_col, eta=4.0, iters=200):
+    """Prior-anchored logit equilibrium of a zero-sum matrix game.
+
+    Mirror-descent fixed point ``p ∝ prior_row · exp(eta · M q)`` /
+    ``q ∝ prior_col · exp(−eta · Mᵀ p)``, iterates averaged. At ``eta → 0``
+    this returns the priors (pure policy play); ``eta → ∞`` approaches the
+    Nash of ``M`` (pure value play). In between, the value head only moves
+    the decision where its payoff differences exceed its noise floor — the
+    stable blend of a strong BC prior with a young value head. Returns
+    ``(row_strategy, col_strategy, value)``.
+    """
+    m = np.asarray(m, dtype=np.float64)
+    nr, nc = m.shape
+    p = np.asarray(prior_row, dtype=np.float64).clip(1e-9)
+    q = np.asarray(prior_col, dtype=np.float64).clip(1e-9)
+    p, q = p / p.sum(), q / q.sum()
+    lp0, lq0 = np.log(p), np.log(q)
+    sum_p, sum_q = np.zeros(nr), np.zeros(nc)
+    for _ in range(iters):
+        p = _softmax_log(lp0 + eta * (m @ q))
+        q = _softmax_log(lq0 - eta * (m.T @ p))
+        sum_p += p
+        sum_q += q
+    avg_p = sum_p / sum_p.sum()
+    avg_q = sum_q / sum_q.sum()
+    return avg_p, avg_q, float(avg_p @ m @ avg_q)
+
+
+def _softmax_log(logits):
+    """Numerically stable softmax of a 1-D log-space vector."""
+    e = np.exp(logits - logits.max())
+    return e / e.sum()

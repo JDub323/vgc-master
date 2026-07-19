@@ -217,20 +217,26 @@ class FeatureExtractor:
 
 # ---- action arrays ---------------------------------------------------------
 # action-kind ids and target ids reused across the codebase (actions.py).
-AK_PASS, AK_MOVE, AK_SWITCH = 0, 1, 2
+AK_PASS, AK_MOVE, AK_SWITCH, AK_UNK = 0, 1, 2, 3
 # fields: kind, move_id, target, mega, switch_idx (incoming preview index+1),
-# basePower, priority(+6). switch_idx 0 = not a switch.
+# basePower, priority(+6). switch_idx 0 = not a switch. AK_UNK marks a mon
+# whose chosen action was unobservable (flinch/sleep/KO'd before acting) —
+# the v3 dynamics learns the MARGINAL transition under it instead of the
+# turn being dropped, so trajectory chains survive those turns.
 N_ACT_FIELDS = 7
+N_ACT_KINDS = 4
 
 
 def action_arrays(pos, my_joint, opp_joint, vocab):
     """Per-mon-token action descriptors for a joint ``(mine, opp)`` action.
 
     ``my_joint``/``opp_joint`` are ``(slot0_idx, slot1_idx)`` slot-action index
-    pairs (``actions.to_index`` space). Returns int64 ``[12, N_ACT_FIELDS]``
-    where each mon token carries the action it takes (PASS for inactive mons);
-    move ids are resolved through the token's own assumed moveset so identity is
-    preserved regardless of slot order.
+    pairs (``actions.to_index`` space), or ``None`` when that side's chosen
+    actions were unobservable — its active mons are then marked ``AK_UNK`` so
+    the dynamics conditions on "acted, unobserved" rather than dropping the
+    turn. Returns int64 ``[12, N_ACT_FIELDS]`` where each mon token carries the
+    action it takes (PASS for inactive mons); move ids resolve through the
+    token's own assumed moveset so identity survives slot order.
     """
     arr = np.zeros((MON_TOKENS, N_ACT_FIELDS), dtype=np.int64)
     _fill_side(arr, 0, pos.my_active, pos.my_movesets, my_joint, vocab)
@@ -287,6 +293,10 @@ def my_action_arrays(pos, my_joint, vocab):
 
 def _fill_side(arr, base, active, movesets, joint, vocab):
     """Place one side's two slot actions onto its active mon tokens."""
+    if joint is None:                        # side acted, actions unobserved
+        for k in active.values():
+            arr[base + k][0] = AK_UNK
+        return
     for slot in (0, 1):
         k = active.get(slot)
         if k is None:

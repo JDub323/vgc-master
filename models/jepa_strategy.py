@@ -37,9 +37,10 @@ class Dynamics(nn.Module):
     def __init__(self, emb, jcfg):
         """Build action tables (sharing the encoder's move table) + layers."""
         super().__init__()
+        from jepa.features import N_ACT_KINDS
         de, d = jcfg.d_embed, jcfg.d_model
         self.emb = [emb]                     # shared move table, not a submodule
-        self.kind = nn.Embedding(3, de)
+        self.kind = nn.Embedding(N_ACT_KINDS, de)   # incl. AK_UNK (unobserved)
         self.target = nn.Embedding(4, de)
         self.switch = nn.Embedding(N_MON + 1, de)
         self.act_proj = nn.Linear(4 * de + 3, d)
@@ -89,7 +90,14 @@ class JEPAStrategyModel(nn.Module):
         self.dynamics = Dynamics(self.encoder.embedder, jcfg)
         self.my_prior = nn.Linear(d, 2 * N_SLOT_ACTIONS)
         self.opp_policy = nn.Linear(d, 2 * N_SLOT_ACTIONS)
-        self.value_head = nn.Linear(d, 1)
+        # distributional value: categorical over the final mon differential
+        # (-4..+4); the scalar value is its expectation in [-1, 1]
+        self.margin_head = nn.Linear(d, jcfg.n_margin_bins)
+        half = (jcfg.n_margin_bins - 1) // 2
+        self.register_buffer(
+            "margin_bins",
+            torch.linspace(-1.0, 1.0, jcfg.n_margin_bins), persistent=False)
+        self.margin_half = half
 
     # -- encode / step -------------------------------------------------------
     def encode(self, pos):
@@ -108,9 +116,14 @@ class JEPAStrategyModel(nn.Module):
         return self.dynamics(z, act, dmg)
 
     # -- heads ---------------------------------------------------------------
+    def margin_logits(self, z):
+        """Final-mon-differential bin logits off a latent set's CLS token."""
+        return self.margin_head(z[:, CLS_TOK])
+
     def value(self, z):
-        """Scalar value in [-1,1] read off a latent set's CLS token."""
-        return torch.tanh(self.value_head(z[:, CLS_TOK])).squeeze(-1)
+        """Scalar value in [-1,1]: expectation of the margin distribution."""
+        p = torch.softmax(self.margin_logits(z), -1)
+        return (p * self.margin_bins).sum(-1)
 
     def policies(self, z):
         """Return ``(my_prior, opp_policy)`` slot logits ``[B, 2, 39]``."""

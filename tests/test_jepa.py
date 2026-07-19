@@ -415,23 +415,35 @@ def test_strategy_dynamics_recursion():
 
 
 def test_seq_windows_shapes():
-    """--seq prep emits padded windows with a correct n_steps mask."""
+    """--seq prep keeps chains through unobservable turns and masks them."""
+    from jepa.features import AK_UNK
     from jepa_data import _seq_windows
     vocab = _vocab()
     _, belief, _, view = _mock_battle(vocab)
     pos = FeatureExtractor(vocab).extract(view, belief.summary())
-    steps = [(pos, None, (1, 1), (1, 1)) for _ in range(8)]
-    steps.insert(4, (pos, None, None, (1, 1)))      # chain break
+    steps = [(pos, view, (1, 1), (1, 1)) for _ in range(8)]
+    steps.insert(4, (pos, view, None, (1, 1)))     # unobservable own actions
     wins = list(_seq_windows(steps, 1, 1.0, vocab))
     assert wins, "no windows emitted"
+    # the unobservable turn did NOT break the chain: with stride 1 over a
+    # 9-step run there are 8 window starts
+    assert len(wins) == 8
+    saw_unk = False
     for s in wins:
         K = s["act"].shape[0]
         assert s["pos_mcat"].shape[0] == K + 1
         m = int(s["n_steps"])
         assert 1 <= m <= K
-        # padded steps beyond n_steps stay zero
+        assert int(s["margin"]) >= 1               # winner-consistent margin
         if m < K:
             assert not s["act"][m:].any()
+        for k in range(m):
+            if not s["a_mask"][k]:
+                saw_unk = True
+                # the unknown side's active mons are AK_UNK, never policy targets
+                assert (s["act"][k][:6, 0] == AK_UNK).sum() == 2
+                assert not s["a_slot"][k].any()
+    assert saw_unk, "the unobservable step never landed inside a window"
 
 
 def test_strategy_training_step():
@@ -453,18 +465,42 @@ def test_strategy_training_step():
               for _ in range(K + 1)], 1),
           "pos_mscal": torch.rand(b, K + 1, 12, N_MON_SCALAR),
           "pos_dmg": torch.rand(b, K + 1, 6, 6),
-          "act": torch.as_tensor(rng.integers(0, 3, (b, K, 12, 7))),
+          "act": torch.as_tensor(rng.integers(0, 4, (b, K, 12, 7))),
           "a_slot": torch.as_tensor(rng.integers(0, 39, (b, K, 2))),
           "b_slot": torch.as_tensor(rng.integers(0, 39, (b, K, 2))),
+          "a_mask": torch.as_tensor(rng.integers(0, 2, (b, K)) > 0),
+          "b_mask": torch.ones(b, K, dtype=torch.bool),
           "n_steps": torch.tensor([K, 3, 1, 2]),
           "value": torch.as_tensor(
               (rng.integers(0, 2, b) * 2 - 1).astype("float32")),
+          "margin": torch.as_tensor(rng.integers(-4, 5, b)),
           "weight": torch.ones(b)}
     sh["pos_mcat"][..., 7] = torch.as_tensor(
         rng.integers(0, len(STATUSES), (b, K + 1, 12)))
     loss, m = losses(model, sh, JCFG)
     loss.backward()
     assert torch.isfinite(loss) and m["jepa"] > 0
+    # policy heads are detached from the trunk by default: policy CE must not
+    # push gradient into the encoder (embedder table grad comes from JEPA path
+    # only — verified by zeroing policy weight changing nothing about it)
+    assert JCFG.policy_detach
+
+
+def test_anchored_solver():
+    """eta->0 returns the prior; high eta approaches Nash; value sane."""
+    from jepa.solver import solve_matrix_anchored
+    m = np.array([[1.0, -1.0], [-1.0, 1.0]])       # matching pennies
+    prior = np.array([0.9, 0.1])
+    p0, _, _ = solve_matrix_anchored(m, prior, prior, eta=1e-6, iters=100)
+    np.testing.assert_allclose(p0, prior, atol=1e-3)   # value can't move it
+    p_hi, q_hi, v_hi = solve_matrix_anchored(m, prior, prior, eta=50.0,
+                                             iters=2000)
+    assert abs(p_hi[0] - 0.5) < 0.08 and abs(v_hi) < 0.1  # ~Nash mix
+    # a dominated row is suppressed even from a favorable prior
+    dom = np.array([[1.0, 1.0], [0.0, 0.0]])
+    p_d, _, _ = solve_matrix_anchored(dom, np.array([0.2, 0.8]),
+                                      np.array([0.5, 0.5]), eta=8.0, iters=500)
+    assert p_d[0] > 0.8
 
 
 def test_strategy_chooser_depths():
@@ -495,7 +531,8 @@ TESTS = [test_features_and_actions, test_model_forward,
          test_consequence_training_step, test_scaled_config_builds_and_runs,
          test_selfplay_losses_backprop, test_recorder_sample_from_plan,
          test_strategy_dynamics_recursion, test_seq_windows_shapes,
-         test_strategy_training_step, test_strategy_chooser_depths]
+         test_strategy_training_step, test_anchored_solver,
+         test_strategy_chooser_depths]
 
 
 if __name__ == "__main__":

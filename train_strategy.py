@@ -38,8 +38,10 @@ def _load_shard(path, device):
             "pos_mcat": long("pos_mcat"), "pos_mscal": flt("pos_mscal"),
             "pos_dmg": flt("pos_dmg"), "act": long("act"),
             "a_slot": long("a_slot"), "b_slot": long("b_slot"),
+            "a_mask": torch.as_tensor(z["a_mask"], device=device),
+            "b_mask": torch.as_tensor(z["b_mask"], device=device),
             "n_steps": long("n_steps"), "value": flt("value"),
-            "weight": flt("weight")}
+            "margin": long("margin"), "weight": flt("weight")}
 
 
 def _pos_at(sh, k):
@@ -49,24 +51,39 @@ def _pos_at(sh, k):
             "dmg": sh["pos_dmg"][:, k]}
 
 
+def _masked_ce(logits, target, mask):
+    """Cross-entropy over the rows where ``mask`` is set (0 when none)."""
+    if mask.sum() == 0:
+        return logits.new_zeros(())
+    return F.cross_entropy(logits[mask], target[mask])
+
+
 def losses(model, sh, jcfg):
-    """Multi-step JEPA + policy + value losses for one window minibatch."""
+    """Multi-step JEPA + policy + margin-value losses for one window batch.
+
+    Encoder-trunk ownership: the policy heads read a DETACHED z0 by default
+    (``policy_detach``), so the representation is shaped by the dynamics and
+    value objectives — the stage-1 full run showed the summed policy CEs
+    dominating the trunk while the JEPA loss rose. Policy CE is a mean per
+    head (not a sum) and masked to observed actions (AK_UNK steps train the
+    dynamics but never the policy)."""
     K = sh["act"].shape[1]
     z0 = model.encode(_pos_at(sh, 0))
-    w = sh["weight"]
-    wn = w / w.mean().clamp_min(1e-6)
 
-    # policy heads at the window start (windows stride over every offset, so
-    # step-0 supervision covers the whole trajectory distribution)
-    my_logits, opp_logits = model.policies(z0)
-    pol_l = (F.cross_entropy(my_logits[:, 0], sh["a_slot"][:, 0, 0])
-             + F.cross_entropy(my_logits[:, 1], sh["a_slot"][:, 0, 1])
-             + F.cross_entropy(opp_logits[:, 0], sh["b_slot"][:, 0, 0])
-             + F.cross_entropy(opp_logits[:, 1], sh["b_slot"][:, 0, 1]))
+    # policy heads at the window start (stride-1 windows cover every offset)
+    z0p = z0.detach() if jcfg.policy_detach else z0
+    my_logits, opp_logits = model.policies(z0p)
+    am, bm = sh["a_mask"][:, 0], sh["b_mask"][:, 0]
+    pol_l = (_masked_ce(my_logits[:, 0], sh["a_slot"][:, 0, 0], am)
+             + _masked_ce(my_logits[:, 1], sh["a_slot"][:, 0, 1], am)
+             + _masked_ce(opp_logits[:, 0], sh["b_slot"][:, 0, 0], bm)
+             + _masked_ce(opp_logits[:, 1], sh["b_slot"][:, 0, 1], bm)) / 4.0
 
-    # value off the encoded present
-    v0 = model.value(z0)
-    value_l = (wn * (v0 - sh["value"]) ** 2).mean()
+    # distributional margin value off the encoded present
+    margin_bin = (sh["margin"] + model.margin_half).clamp(
+        0, jcfg.n_margin_bins - 1)
+    value_l = F.cross_entropy(model.margin_logits(z0), margin_bin)
+    value_norm = 1.0
 
     # multi-step latent unroll vs EMA targets of the realized positions
     zhat = z0
@@ -75,25 +92,26 @@ def losses(model, sh, jcfg):
     for k in range(1, K + 1):
         dmg = sh["pos_dmg"][:, 0] if k == 1 else None
         zhat = model.step(zhat, sh["act"][:, k - 1], dmg)
-        mask = (sh["n_steps"] >= k).float()
+        mask = sh["n_steps"] >= k
         if mask.sum() == 0:
             break
         target = model.target_encode(_pos_at(sh, k))
         per = F.smooth_l1_loss(zhat, target, reduction="none").mean((1, 2))
         g = jcfg.unroll_gamma ** (k - 1)
-        jepa_l = jepa_l + g * (per * mask).sum() / mask.sum()
+        jepa_l = jepa_l + g * (per * mask.float()).sum() / mask.sum()
         jepa_norm += g
-        vk = model.value(zhat)
-        value_l = value_l + g * ((vk - sh["value"]) ** 2 * mask).sum() \
-            / mask.sum().clamp_min(1.0)
+        value_l = value_l + g * _masked_ce(model.margin_logits(zhat),
+                                           margin_bin, mask)
+        value_norm += g
     jepa_l = jepa_l / max(jepa_norm, 1e-6)
-    value_l = value_l / (1.0 + jepa_norm)
+    value_l = value_l / value_norm
 
     var_l, cov_l = _vicreg(z0, jcfg.vicreg_gamma)
     total = (jcfg.w_jepa_s * jepa_l + jcfg.w_value_s * value_l
              + jcfg.w_policy_s * pol_l
              + jcfg.w_vicreg_var * var_l + jcfg.w_vicreg_cov * cov_l)
-    my_acc = (my_logits.argmax(-1) == sh["a_slot"][:, 0]).float().mean()
+    my_acc = (my_logits.argmax(-1) == sh["a_slot"][:, 0])[am].float().mean() \
+        if am.any() else torch.zeros(())
     return total, {"total": total.item(), "jepa": jepa_l.item(),
                    "value": value_l.item(), "policy": pol_l.item(),
                    "my_acc": my_acc.item(), "var": var_l.item()}

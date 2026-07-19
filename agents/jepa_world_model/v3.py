@@ -22,12 +22,13 @@ import torch
 
 from actions import (SlotAction, T_AUTO, T_FOE_A, T_FOE_B, _pos_maps,
                      joint_ok, legal_joint_actions)
-from agents.jepa_world_model.v1 import (_decoded, _info, _movesets,
-                                        _opp_slot_actions, _top_joints)
+from agents.jepa_world_model.v1 import (_decoded, _info, _joint_score,
+                                        _movesets, _opp_slot_actions,
+                                        _top_joints)
 from config import CFG
 from jepa.config import JCFG
 from jepa.features import FeatureExtractor, action_arrays
-from jepa.solver import solve_matrix
+from jepa.solver import solve_matrix_anchored
 
 N_MOVES = 4
 
@@ -86,6 +87,7 @@ class JEPAStrategyChooser:
                 if belief is not None else [None])
         v_sum = None
         my_cands = opp_cands = None
+        my_prior = opp_prior = None
         first_pos = None
         for det in dets:
             pos = self.extractor.extract(view, summary,
@@ -94,17 +96,21 @@ class JEPAStrategyChooser:
             if my_cands is None:
                 first_pos = pos
                 my_logits, opp_logits = self.model.policies(z)
-                my_cands = _top_joints(legal, my_logits[0].cpu().numpy(),
-                                       self.jcfg.top_k_mine_s)
+                my_lg = my_logits[0].cpu().numpy()
+                opp_lg = opp_logits[0].cpu().numpy()
+                my_cands = _top_joints(legal, my_lg, self.jcfg.top_k_mine_s)
                 opp_cands = _top_joints(self._opp_actions(view, belief),
-                                        opp_logits[0].cpu().numpy(),
-                                        self.jcfg.top_k_opp_s)
+                                        opp_lg, self.jcfg.top_k_opp_s)
+                my_prior = _joint_prior(my_cands, my_lg)
+                opp_prior = _joint_prior(opp_cands, opp_lg)
             v = self._matrix(z, pos, my_cands, opp_cands,
                              depth=self.jcfg.plan_depth)
             v_sum = v if v_sum is None else v_sum + v
         v = v_sum / len(dets)
 
-        p_row, p_col, val = solve_matrix(v, self.jcfg.solver_iters)
+        p_row, p_col, val = solve_matrix_anchored(
+            v, my_prior, opp_prior, self.jcfg.solver_eta,
+            self.jcfg.solver_iters)
         idx = self._sample(p_row, temp)
         if self.record:
             self.last_plan = {"pos": first_pos, "cands": my_cands,
@@ -137,10 +143,11 @@ class JEPAStrategyChooser:
         return vals.reshape(na, nb)
 
     def _child_value(self, zp, pos, a, b, depth):
-        """Leaf value at depth >= 2: solve the child matrix under ``zp``."""
+        """Leaf value at depth >= 2: solve the anchored child matrix under ``zp``."""
         my_act, opp_act = _propagate_active(pos, a, b)
-        my_c = self._latent_cands(zp, my_act, pos.my_movesets, mine=True)
-        opp_c = self._latent_cands(zp, opp_act, pos.opp_movesets, mine=False)
+        my_c, my_p = self._latent_cands(zp, my_act, pos.my_movesets, mine=True)
+        opp_c, opp_p = self._latent_cands(zp, opp_act, pos.opp_movesets,
+                                          mine=False)
         if not my_c or not opp_c:
             return float(self.model.value(zp).cpu().numpy()[0])
         import dataclasses
@@ -152,17 +159,20 @@ class JEPAStrategyChooser:
         act_t = torch.as_tensor(acts, dtype=torch.long, device=self.device)
         zc = self.model.step(zp.expand(na * nb, -1, -1), act_t, None)
         v = self.model.value(zc).cpu().numpy().reshape(na, nb)
-        return float(solve_matrix(v, self.jcfg.solver_iters)[2])
+        return float(solve_matrix_anchored(v, my_p, opp_p,
+                                           self.jcfg.solver_eta,
+                                           self.jcfg.solver_iters)[2])
 
     def _latent_cands(self, zp, active, movesets, mine):
-        """Child joint candidates ranked by the policy heads on ``zp``."""
+        """Child joint candidates + prior, ranked by the policy heads on ``zp``."""
         my_logits, opp_logits = self.model.policies(zp)
         logits = (my_logits if mine else opp_logits)[0].cpu().numpy()
         slot_acts = [_slot_actions_from_map(active, s, movesets)
                      for s in (0, 1)]
         joints = [(x, y) for x in slot_acts[0] for y in slot_acts[1]
                   if joint_ok(x, y)]
-        return _top_joints(joints, logits, self.jcfg.child_k)
+        cands = _top_joints(joints, logits, self.jcfg.child_k)
+        return cands, _joint_prior(cands, logits)
 
     def _opp_actions(self, view, belief):
         """Believed opponent joint actions (same construction as v1)."""
@@ -205,6 +215,15 @@ class JEPAStrategyChooser:
         w = np.power(np.clip(p_row, 1e-9, None), 1.0 / temp)
         w = w / w.sum()
         return int(self.rng.choices(range(len(w)), weights=w)[0])
+
+
+def _joint_prior(joints, logits):
+    """Softmax prior over candidate joints from per-slot policy logits."""
+    lsm = logits - logits.max(-1, keepdims=True)
+    lsm = lsm - np.log(np.exp(lsm).sum(-1, keepdims=True))
+    scores = np.array([_joint_score(j, lsm) for j in joints])
+    e = np.exp(scores - scores.max())
+    return e / e.sum()
 
 
 # ---- depth >= 2 helpers -----------------------------------------------------

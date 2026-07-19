@@ -82,15 +82,28 @@ class JEPAConfig:
     # unrolls on sequence windows; play is a depth-`plan_depth` latent
     # matrix-tree search (depth 1 = v1-style one-ply matrix at v2 speed).
     seq_len: int = 5                   # actions per training window (positions = +1)
-    seq_stride: int = 3                # window stride over each labelled run
+    seq_stride: int = 1                # window stride (dense; chains no longer
+    #                                    break on unobservable turns, so windows
+    #                                    are cheap and the data is 4x richer)
     unroll_gamma: float = 0.8          # per-step discount on multi-step JEPA loss
     w_jepa_s: float = 1.0              # latent dynamics prediction loss
-    w_policy_s: float = 0.5            # my-prior + opp-policy CE at window start
-    w_value_s: float = 0.5             # outcome value off encoded + unrolled latents
+    w_policy_s: float = 0.5            # policy CE (mean per head, masked)
+    # Detach the policy heads from the encoder trunk: the heads still train,
+    # but the encoder's representation is shaped by JEPA + value only. The v3
+    # full-scale run showed the summed 39-way CEs dominating the encoder ~20:1
+    # and the dynamics loss RISING all run — the world model must own the trunk.
+    policy_detach: bool = True
+    w_value_s: float = 0.5             # margin-distribution CE off encoded + unrolled
+    n_margin_bins: int = 9             # final mon differential -4..+4
     plan_depth: int = 1                # play-time latent search depth (1 or 2)
     top_k_mine_s: int = 6              # root candidate width, own side
     top_k_opp_s: int = 6               # root candidate width, opponent side
     child_k: int = 4                   # per-side candidate width at depth >= 2
+    # Prior-anchored equilibrium: p ∝ prior·exp(eta·Mq). eta -> 0 plays the
+    # policy prior; eta -> inf approaches Nash on the value matrix. Keeps the
+    # decision anchored to the strong BC prior wherever value differences are
+    # inside the value head's noise floor (the v3 stage-1 regression cause).
+    solver_eta: float = 4.0
 
     # ---- consequence self-play (selfplay_jepa.py) ----
     # jepa-c decides ~300x faster than DUCT because it never touches the sim
