@@ -100,7 +100,13 @@ class JEPAConfig:
     w_value_s: float = 0.5             # margin-distribution CE off encoded + unrolled
     n_margin_bins: int = 9             # final mon differential -4..+4
     plan_depth: int = 1                # play-time latent search depth (1 or 2)
-    top_k_mine_s: int = 6              # root candidate width, own side
+    # Own-side candidates are NOT pruned (cap only): stage-1 and stage-3 both
+    # capped at top-6 through the per-slot prior (top-1 ~0.21) and both landed
+    # at 18% vs bermuda under totally different solvers, while v2 — which
+    # scored the FULL legal set — got 38%. A 6-item menu that omits the right
+    # move ~half the time is a ceiling no solver can fix. 64 x 6 is still only
+    # ~384 batched T applications (~0.02s/move).
+    top_k_mine_s: int = 64             # root candidate cap, own side (all legal)
     top_k_opp_s: int = 6               # root candidate width, opponent side
     child_k: int = 4                   # per-side candidate width at depth >= 2
     # Prior-anchored equilibrium: p ∝ prior·exp(eta·Mq). eta -> 0 plays the

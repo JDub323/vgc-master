@@ -521,7 +521,10 @@ def test_strategy_chooser_depths():
     model = JEPAStrategyModel(vocab.sizes(), JCFG, vocab.state())
     tracker, belief, request, _ = _mock_battle(vocab)
     for depth in (1, 2):
-        jc = dataclasses.replace(JCFG, plan_depth=depth)
+        # depth 2 expands every leaf; keep the root narrow so the CPU test
+        # stays fast (play defaults to the uncapped menu at depth 1)
+        jc = dataclasses.replace(JCFG, plan_depth=depth,
+                                 top_k_mine_s=64 if depth == 1 else 6)
         chooser = JEPAStrategyChooser(model, vocab, CFG, jc, seed=0,
                                       bridge=None)
         joint, info = chooser.choose(tracker, belief, "p1", request,

@@ -13,6 +13,11 @@ chooser should be configured — before any games are played:
       game outcome (won/lost positions should separate cleanly).
   policy quality                 Per-slot top-1/top-3 of the prior head on
       observed actions (the anchor of the anchored solve).
+  candidate coverage             Fraction of positions where the HUMAN joint
+      action appears in the prior-ranked top-k of the enumerated own joint
+      set (k = 6 / 16 / all). This was the 18%-ceiling: both 18% runs pruned
+      to top-6 through a per-slot prior with top-1 ~0.21, so the menu often
+      omitted the right move entirely; v2 scored the full set and got 38%.
 
 CLI: python probe_strategy.py [--ckpt PATH] [--data DIR] [--shards N]
                               [--batches N]
@@ -28,6 +33,52 @@ import torch
 from config import CFG
 from train_strategy import _batches, _pos_at
 
+# jepa.features mon-scalar / mon-categorical column indices used to
+# reconstruct the own action space from stored window arrays
+_MS_FAINTED, _MS_SLOT_A, _MS_SLOT_B = 1, 3, 4
+_MC_MV0 = 3
+
+
+def _own_joints_from_arrays(mcat, mscal):
+    """Enumerate plausible own joint actions (index space) from window arrays.
+
+    Rebuilds each active own mon's menu — known move slots x the three
+    single-target codes x mega bit, plus switches to live bench mons — from
+    the stored ``mon_cat``/``mon_scalar`` rows (own side = tokens 0..5).
+    A superset of true legality (PP/trapping unknown), matching what the
+    chooser's candidate ranking sees."""
+    from actions import SlotAction, joint_ok, to_index
+    active = {}
+    bench = []
+    for k in range(6):
+        if mscal[k, _MS_FAINTED] > 0.5:
+            continue
+        if mscal[k, _MS_SLOT_A] > 0.5:
+            active[0] = k
+        elif mscal[k, _MS_SLOT_B] > 0.5:
+            active[1] = k
+        else:
+            bench.append(k)
+
+    def slot_acts(slot):
+        """Index-space actions for one active slot (PASS when empty)."""
+        k = active.get(slot)
+        if k is None:
+            return [SlotAction("pass")]
+        acts = [SlotAction("switch", switch_to=j) for j in bench]
+        for j in range(4):
+            if mcat[k, _MC_MV0 + j] == 0:
+                continue
+            for tgt in (0, 1, 2, 3):       # AUTO / FOE_A / FOE_B / ALLY
+                acts.append(SlotAction("move", move_slot=j, target=tgt))
+                acts.append(SlotAction("move", move_slot=j, target=tgt,
+                                       mega=True))
+        return acts or [SlotAction("pass")]
+
+    s0, s1 = slot_acts(0), slot_acts(1)
+    return [(to_index(a), to_index(b)) for a in s0 for b in s1
+            if joint_ok(a, b)]
+
 
 @torch.no_grad()
 def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
@@ -40,6 +91,7 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
         sorted(Path(data_dir).glob("*.npz"))
     cf_hits = cf_n = 0
     top1 = top3 = pol_n = 0
+    cov6 = cov16 = cov_n = 0
     v_by_outcome = {1: [], -1: [], 0: []}
     for bi, sh in enumerate(_batches(paths, bs, device, shuffle=True,
                                      limit_shards=n_shards)):
@@ -76,6 +128,25 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
             top3 += int((lg.topk(3, -1).indices == tgt[..., None]).any(-1).sum())
             pol_n += int(am.sum()) * 2
 
+        # candidate coverage: rank the enumerated own joint set by the prior
+        # and find the human joint's rank (the chooser can only play what its
+        # menu contains)
+        lsm = torch.log_softmax(my_logits, -1).cpu().numpy()
+        mcat_np = sh["pos_mcat"][:, 0].cpu().numpy()
+        mscal_np = sh["pos_mscal"][:, 0].cpu().numpy()
+        aslot_np = sh["a_slot"][:, 0].cpu().numpy()
+        for i in torch.nonzero(am).squeeze(-1).cpu().numpy():
+            joints = _own_joints_from_arrays(mcat_np[i], mscal_np[i])
+            human = (int(aslot_np[i][0]), int(aslot_np[i][1]))
+            if human not in joints:
+                cov_n += 1          # menu can't contain it -> counts as a miss
+                continue
+            scores = np.array([lsm[i, 0, a] + lsm[i, 1, b] for a, b in joints])
+            rank = int((scores > scores[joints.index(human)]).sum())
+            cov_n += 1
+            cov6 += rank < 6
+            cov16 += rank < 16
+
     cf = cf_hits / max(1, cf_n)
     report = {
         "counterfactual_value_ranking": round(cf, 4),
@@ -83,7 +154,10 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
         "value_mean_when_lost": round(float(np.mean(v_by_outcome[-1] or [0])), 4),
         "policy_top1_per_slot": round(top1 / max(1, pol_n), 4),
         "policy_top3_per_slot": round(top3 / max(1, pol_n), 4),
+        "candidate_coverage_top6": round(cov6 / max(1, cov_n), 4),
+        "candidate_coverage_top16": round(cov16 / max(1, cov_n), 4),
         "n_counterfactuals": cf_n,
+        "n_coverage": cov_n,
     }
     print(json.dumps(report, indent=1))
     if cf < 0.55:
@@ -93,6 +167,11 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
     else:
         print(f"VERDICT: value ranks the human move {cf:.0%} of the time -- "
               "eta in spread units is usable.")
+    c6 = cov6 / max(1, cov_n)
+    if c6 < 0.7:
+        print(f"VERDICT: a top-6 menu contains the human move only {c6:.0%} "
+              "of the time -- prune-to-6 is a hard ceiling; score the full "
+              "legal set (top_k_mine_s=64).")
     return report
 
 

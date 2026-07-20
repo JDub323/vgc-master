@@ -196,6 +196,23 @@ that was only ever supervised on the human-taken action is exploitable by
 construction — counterfactual (what-if sim) grounding is not an optional
 stage-3 nicety, it is what makes value-led decisions legitimate.
 
+**Stage-3 result and the pruning-ceiling diagnosis (2026-07-20).** With the
+grad-scale/standardized-solve fixes, the full retrain looked healthy on every
+internal metric (jepa 0.39->0.22 monotone, my_acc 0.20, probe counterfactual
+ranking 0.745, calibration correctly signed) — and still scored **18% vs
+bermuda**, identical to broken stage 1. That coincidence is the diagnosis:
+stage 1 (pure Nash on value) and stage 3 (anchored standardized eta=1.5) share
+only one decision component — **top-6 own-candidate pruning through a
+per-slot prior with top-1 ~0.21** — while v2, which scored the FULL legal set
+every turn, got 38% from the same data. A 6-item menu that omits the human's
+move roughly half the time is a ceiling no solver, value head, or eta can fix.
+Change: `top_k_mine_s` 6 -> 64 (score all legal own joints; 64x6 = ~384
+batched T applications, still ~0.02s/move), play-time only — **no retrain
+required**. `probe_strategy.py` now also reports `candidate_coverage_top6/16`
+(fraction of positions whose prior-ranked top-k contains the human joint), so
+this failure class is measured before any series; validated against a
+random-init model (coverage@6 ~= k/n_joints, cf ranking ~= 0.5).
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT
