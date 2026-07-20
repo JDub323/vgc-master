@@ -85,13 +85,22 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
     """Run all probes; print a report and return the metrics dict."""
     from models.jepa_strategy import JEPAStrategyModel
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, _ = JEPAStrategyModel.load(ckpt, device)
+    model, vstate = JEPAStrategyModel.load(ckpt, device)
     model.eval()
+    builder = None
+    if hasattr(model, "score_head"):
+        from beliefs import load_dex
+        from jepa.candidates import CandidateBuilder
+        from jepa.vocab import JEPAVocab
+        vocab = (JEPAVocab.from_state(vstate, load_dex(CFG)) if vstate
+                 else JEPAVocab.build(CFG))
+        builder = CandidateBuilder(vocab)
     paths = sorted(Path(data_dir).glob("val_*.npz")) or \
         sorted(Path(data_dir).glob("*.npz"))
     cf_hits = cf_n = 0
     top1 = top3 = pol_n = 0
     cov6 = cov16 = cov_n = 0
+    sc_top1 = sc_top3 = sc_cov6 = sc_n = 0
     v_by_outcome = {1: [], -1: [], 0: []}
     for bi, sh in enumerate(_batches(paths, bs, device, shuffle=True,
                                      limit_shards=n_shards)):
@@ -147,6 +156,27 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
             cov6 += rank < 6
             cov16 += rank < 16
 
+            # score-head joint ranking over the same reconstructed menu:
+            # every candidate through T with the opponent marginalized
+            if builder is not None:
+                sj, active, moves = builder.menu(mcat_np[i], mscal_np[i])
+                from actions import to_index
+                idx_pairs = [(to_index(a), to_index(b)) for a, b in sj]
+                if human not in idx_pairs:
+                    sc_n += 1
+                    continue
+                arrs = builder.arrays(sj, active, moves, mscal_np[i])
+                act_t = torch.as_tensor(arrs.astype(np.int64), device=device)
+                n = len(sj)
+                zp = model.step(z0[i:i + 1].expand(n, -1, -1), act_t,
+                                sh["pos_dmg"][i:i + 1, 0].expand(n, -1, -1))
+                s = model.score(zp).cpu().numpy()
+                srank = int((s > s[idx_pairs.index(human)]).sum())
+                sc_n += 1
+                sc_top1 += srank == 0
+                sc_top3 += srank < 3
+                sc_cov6 += srank < 6
+
     cf = cf_hits / max(1, cf_n)
     report = {
         "counterfactual_value_ranking": round(cf, 4),
@@ -159,7 +189,23 @@ def probe(ckpt, data_dir, n_shards=1, n_batches=40, bs=64):
         "n_counterfactuals": cf_n,
         "n_coverage": cov_n,
     }
+    if builder is not None:
+        report.update({
+            "score_top1_joint": round(sc_top1 / max(1, sc_n), 4),
+            "score_top3_joint": round(sc_top3 / max(1, sc_n), 4),
+            "score_top6_joint": round(sc_cov6 / max(1, sc_n), 4),
+            "n_score": sc_n,
+        })
     print(json.dumps(report, indent=1))
+    if builder is not None:
+        s1 = sc_top1 / max(1, sc_n)
+        print(f"VERDICT: score head ranks the human JOINT action top-1 "
+              f"{s1:.0%} of the time (v2's BC primitive was ~0.2 per-slot "
+              f"joint-ranked far worse). "
+              + ("BC prior is strong -- eta=0 export should approach v2's "
+                 "level." if s1 >= 0.15 else
+                 "score head is weak -- inspect score_acc in training before "
+                 "playing games."))
     if cf < 0.55:
         print("VERDICT: value head has ~no counterfactual signal -- set "
               "solver_eta near 0 (play the prior) until what-if grounding "

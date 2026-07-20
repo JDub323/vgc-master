@@ -115,6 +115,22 @@ class JEPAConfig:
     # is in units of that decision's own value spread — a miscalibrated value
     # head cannot buy influence just by being confidently spread out.
     solver_eta: float = 1.5
+    # ---- v3 BC scoring heads (stage 3b: v2's primitive inside v3) ----
+    # Each own/opp candidate is scored through a full action-conditioned pass
+    # of T (other side = AK_UNK) and trained with candidate CE against
+    # ``n_score_neg`` sampled legal negatives, exactly v2's candidate CE. At
+    # play time (``prior_from_score``) these joint scores replace the
+    # factorized per-slot prior in the anchored solve: at eta=0 the agent is
+    # functionally v2-inside-v3 (BC-scored argmax over the full legal set),
+    # so any gap to v2's 38% isolates a v3-specific bug.
+    w_score_s: float = 1.0             # candidate-CE loss weight
+    n_score_neg: int = 7               # sampled negatives per masked row/side
+    score_grad_scale: float = 1.0      # score gradient into T+encoder (v2 was
+    #                                    end-to-end; unlike the per-slot CE,
+    #                                    this objective is action-conditioned
+    #                                    and aligned with the dynamics)
+    prior_from_score: bool = True      # chooser: score-head prior (False =
+    #                                    old factorized per-slot prior)
 
     # ---- consequence self-play (selfplay_jepa.py) ----
     # jepa-c decides ~300x faster than DUCT because it never touches the sim

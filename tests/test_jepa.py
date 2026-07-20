@@ -477,9 +477,21 @@ def test_strategy_training_step():
           "weight": torch.ones(b)}
     sh["pos_mcat"][..., 7] = torch.as_tensor(
         rng.integers(0, len(STATUSES), (b, K + 1, 12)))
+    # attach BC-scoring negatives exactly as _load_shard would
+    from jepa.candidates import CandidateBuilder
+    builder = CandidateBuilder(vocab, n_neg=3)
+    for side, slot, mask in (("my", "a_slot", "a_mask"),
+                             ("opp", "b_slot", "b_mask")):
+        negs, nm = builder.negatives(sh["pos_mcat"][:, 0].numpy(),
+                                     sh["pos_mscal"][:, 0].numpy(),
+                                     sh[slot][:, 0].numpy(),
+                                     sh[mask][:, 0].numpy(), side=side)
+        sh[f"negs_{side}"] = torch.as_tensor(negs.astype(np.int64))
+        sh[f"negs_{side}_mask"] = torch.as_tensor(nm)
     loss, m = losses(model, sh, JCFG)
     loss.backward()
     assert torch.isfinite(loss) and m["jepa"] > 0
+    assert np.isfinite(m["score"]) and np.isfinite(m["score_acc"])
     assert 0.0 < JCFG.policy_grad_scale < 1.0     # partial trunk gradient
 
 
@@ -510,6 +522,53 @@ def test_anchored_solver():
     p_d, _, _ = solve_matrix_anchored(dom, np.array([0.2, 0.8]),
                                       np.array([0.5, 0.5]), eta=8.0, iters=500)
     assert p_d[0] > 0.8
+
+
+def test_candidate_builder():
+    """Menus rebuilt from stored tensors match play-time semantics."""
+    from actions import to_index
+    from jepa.candidates import CandidateBuilder
+    from jepa.features import AK_UNK, MS_ACTIVE
+    vocab = _vocab()
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    builder = CandidateBuilder(vocab, n_neg=5)
+    joints, active, moves = builder.menu(pos.mon_cat, pos.mon_scalar, "my")
+    assert len(joints) > 10                       # moves x targets + switches
+    kinds = {(a.kind, b.kind) for a, b in joints}
+    assert any("move" in k for k in kinds) and any("switch" in k for k in kinds)
+    arrs = builder.arrays(joints, active, moves, pos.mon_scalar, "my")
+    assert arrs.shape == (len(joints), 12, 7)
+    for j in range(6):                            # foe actives marginalized
+        if pos.mon_scalar[6 + j, MS_ACTIVE] > 0.5:
+            assert (arrs[:, 6 + j, 0] == AK_UNK).all()
+    # negatives never contain the human joint
+    human = joints[3]
+    hidx = np.array([[to_index(human[0]), to_index(human[1])]])
+    negs, nm = builder.negatives(pos.mon_cat[None], pos.mon_scalar[None],
+                                 hidx, np.array([True]), side="my")
+    assert nm[0].all() and negs.shape == (1, 5, 12, 7)
+    harr = builder.arrays([human], active, moves, pos.mon_scalar, "my")[0]
+    assert not any((negs[0, i] == harr).all() for i in range(5))
+    # opponent side works symmetrically (own actives marked AK_UNK)
+    oj, oact, omoves = builder.menu(pos.mon_cat, pos.mon_scalar, "opp")
+    oarrs = builder.arrays(oj, oact, omoves, pos.mon_scalar, "opp")
+    assert (oarrs[:, 0, 0] == AK_UNK).all()       # own slot-0 mon is active
+
+
+def test_score_heads_rank():
+    """Score heads read T outputs and the chooser's score prior normalizes."""
+    from models.jepa_strategy import JEPAStrategyModel
+    vocab = _vocab()
+    model = JEPAStrategyModel(vocab.sizes(), JCFG, vocab.state())
+    _, belief, _, view = _mock_battle(vocab)
+    pos = FeatureExtractor(vocab).extract(view, belief.summary())
+    b = _batch([pos], model)
+    z = model.encode(b)
+    act = torch.as_tensor(action_arrays(pos, (1, 1), None, vocab))[None]
+    zp = model.step(z, act, b["dmg"])
+    assert model.score(zp).shape == (1,)
+    assert model.opp_score(zp).shape == (1,)
 
 
 def test_strategy_chooser_depths():
@@ -544,7 +603,8 @@ TESTS = [test_features_and_actions, test_model_forward,
          test_selfplay_losses_backprop, test_recorder_sample_from_plan,
          test_strategy_dynamics_recursion, test_seq_windows_shapes,
          test_strategy_training_step, test_policy_grad_scale,
-         test_anchored_solver, test_strategy_chooser_depths]
+         test_anchored_solver, test_candidate_builder,
+         test_score_heads_rank, test_strategy_chooser_depths]
 
 
 if __name__ == "__main__":

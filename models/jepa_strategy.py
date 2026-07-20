@@ -116,6 +116,17 @@ class JEPAStrategyModel(nn.Module):
             nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 2 * N_SLOT_ACTIONS))
         self.opp_policy = nn.Sequential(
             nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 2 * N_SLOT_ACTIONS))
+        # BC scoring heads (v2's proven decision primitive, transplanted):
+        # a candidate own/opp joint action is scored by reading the CLS of
+        # T(z, action, other-side=UNK) — the consequence of one side's move
+        # with the opponent marginalized. Trained with candidate CE against
+        # sampled legal negatives (jepa/candidates.py); at play time these
+        # joint, action-conditioned scores replace the factorized per-slot
+        # prior, whose joint ranking was the 14-18% ceiling.
+        self.score_head = nn.Sequential(
+            nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+        self.opp_score_head = nn.Sequential(
+            nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
         # distributional value: categorical over the final mon differential
         # (-4..+4); the scalar value is its expectation in [-1, 1]
         self.margin_head = nn.Linear(d, jcfg.n_margin_bins)
@@ -150,6 +161,14 @@ class JEPAStrategyModel(nn.Module):
         """Scalar value in [-1,1]: expectation of the margin distribution."""
         p = torch.softmax(self.margin_logits(z), -1)
         return (p * self.margin_bins).sum(-1)
+
+    def score(self, zp):
+        """Own-candidate BC logit ``[B]`` off a predicted latent set's CLS."""
+        return self.score_head(zp[:, CLS_TOK]).squeeze(-1)
+
+    def opp_score(self, zp):
+        """Opponent-candidate BC logit ``[B]`` (symmetric head)."""
+        return self.opp_score_head(zp[:, CLS_TOK]).squeeze(-1)
 
     def policies(self, z, grad_scale=None):
         """Return ``(my_prior, opp_policy)`` slot logits ``[B, 2, 39]``.

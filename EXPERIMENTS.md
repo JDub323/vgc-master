@@ -213,6 +213,34 @@ required**. `probe_strategy.py` now also reports `candidate_coverage_top6/16`
 this failure class is measured before any series; validated against a
 random-init model (coverage@6 ~= k/n_joints, cf ranking ~= 0.5).
 
+**Stage-4 result: uncapping didn't help — the decision rule, not the menu,
+is the bottleneck (2026-07-20).** `exp-jepa-s4` (same l3 checkpoint,
+`top_k_mine_s=64`) scored **14% vs bermuda** (elo -315), statistically the
+same as the top-6 runs, while the probe confirmed the coverage ceiling was
+real (coverage@6 = 18%, @16 = 34%). Both facts together isolate the cause:
+the **factorized per-slot prior cannot joint-rank** (per-slot top-1 0.19 ⇒
+joint top-1 ~0.04; the human joint isn't in its top-16 two-thirds of the
+time), and widening the menu to 64 only worsened the optimizer's curse —
+argmax over more noisy-biased value estimates through a diffuse prior. This
+is the head design the trunk repo already abandoned for a joint head in
+phase 3; meanwhile v2's 38% came from scoring each candidate through a full
+action-conditioned forward pass (candidate CE). Fix (this branch): **BC
+scoring heads on the dynamics itself** — `score_head`/`opp_score_head` read
+CLS of `T(z, action, other-side=AK_UNK)` ("my move's consequence, opponent
+marginalized" = v2's primitive re-expressed through v3's dynamics), trained
+with v2-style candidate CE against sampled legal negatives synthesized
+on-the-fly from the stored window tensors (`jepa/candidates.py`, disk-cached
+per shard under `<data>/negcache/` — no re-prep). At play time
+(`prior_from_score=True`) these joint action-conditioned scores replace the
+factorized prior in the anchored solve, so **eta=0 is functionally
+v2-inside-v3** (BC argmax over the full legal set, expected ~38%) and any gap
+isolates a v3-specific bug; the eta sweep upward then measures exactly what
+the value matrix adds over BC play. `probe_strategy.py` now reports
+`score_top1/3/6_joint` (joint-ranking quality of the score head over the
+reconstructed full menu). Needs one big-box retrain (`train_strategy.py
+--large`, shard schema unchanged); run the eta=0 export as the FIRST series,
+then sweep eta 0 / 1.5 / 3.
+
 ### Next-state variant (`jepa`)
 
 **What it is.** A learned latent one-ply world model replaces determinized DUCT

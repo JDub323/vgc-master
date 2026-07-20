@@ -95,14 +95,27 @@ class JEPAStrategyChooser:
             z = self.model.encode(self._batch(pos, 1))
             if my_cands is None:
                 first_pos = pos
-                my_logits, opp_logits = self.model.policies(z)
-                my_lg = my_logits[0].cpu().numpy()
-                opp_lg = opp_logits[0].cpu().numpy()
-                my_cands = _top_joints(legal, my_lg, self.jcfg.top_k_mine_s)
-                opp_cands = _top_joints(self._opp_actions(view, belief),
-                                        opp_lg, self.jcfg.top_k_opp_s)
-                my_prior = _joint_prior(my_cands, my_lg)
-                opp_prior = _joint_prior(opp_cands, opp_lg)
+                opp_joints = self._opp_actions(view, belief)
+                if getattr(self.jcfg, "prior_from_score", True):
+                    # joint action-conditioned BC prior: every candidate is
+                    # scored through T with the other side marginalized
+                    # (AK_UNK) — v2's consequence scoring. At eta=0 the solve
+                    # returns this prior, i.e. BC play over the full legal set.
+                    my_cands, my_prior = self._score_rank(
+                        z, pos, legal, mine=True, k=self.jcfg.top_k_mine_s)
+                    opp_cands, opp_prior = self._score_rank(
+                        z, pos, opp_joints, mine=False,
+                        k=self.jcfg.top_k_opp_s)
+                else:                     # factorized per-slot prior (legacy)
+                    my_logits, opp_logits = self.model.policies(z)
+                    my_lg = my_logits[0].cpu().numpy()
+                    opp_lg = opp_logits[0].cpu().numpy()
+                    my_cands = _top_joints(legal, my_lg,
+                                           self.jcfg.top_k_mine_s)
+                    opp_cands = _top_joints(opp_joints, opp_lg,
+                                            self.jcfg.top_k_opp_s)
+                    my_prior = _joint_prior(my_cands, my_lg)
+                    opp_prior = _joint_prior(opp_cands, opp_lg)
             v = self._matrix(z, pos, my_cands, opp_cands,
                              depth=self.jcfg.plan_depth)
             v_sum = v if v_sum is None else v_sum + v
@@ -122,8 +135,31 @@ class JEPAStrategyChooser:
                 "health": {"candidates": float(len(my_cands)),
                            "opp_candidates": float(len(opp_cands)),
                            "determinizations": float(len(dets)),
-                           "depth": float(self.jcfg.plan_depth)}}
+                           "depth": float(self.jcfg.plan_depth),
+                           "score_prior": float(getattr(
+                               self.jcfg, "prior_from_score", True))}}
         return my_cands[idx], info
+
+    def _score_rank(self, z, pos, joints, mine, k):
+        """Rank a side's joint candidates by its BC score head through ``T``.
+
+        Returns the top-``k`` joints and a softmax prior over them."""
+        n = len(joints)
+        if mine:
+            acts = np.stack([action_arrays(pos, j, None, self.vocab)
+                             for j in joints])
+        else:
+            acts = np.stack([action_arrays(pos, None, j, self.vocab)
+                             for j in joints])
+        act_t = torch.as_tensor(acts, dtype=torch.long, device=self.device)
+        dmg_t = torch.as_tensor(pos.dmg_edge, dtype=torch.float32,
+                                device=self.device)[None].expand(n, -1, -1)
+        zp = self.model.step(z.expand(n, -1, -1), act_t, dmg_t)
+        s = (self.model.score(zp) if mine
+             else self.model.opp_score(zp)).cpu().numpy()
+        idx = np.argsort(-s)[:max(1, k)]
+        e = np.exp(s[idx] - s[idx].max())
+        return [joints[i] for i in idx], e / e.sum()
 
     def _matrix(self, z, pos, my_cands, opp_cands, depth):
         """Payoff matrix ``[na, nb]`` via one batched ``T`` application/pair."""
@@ -281,6 +317,21 @@ def build_jepa_strategy_chooser(ckpt=None, cfg=CFG, jcfg=JCFG, seed=0):
         vocab = JEPAVocab.build(cfg)
         model = JEPAStrategyModel(vocab.sizes(), jcfg, vocab.state()).to(device)
     mjcfg = model.jcfg
+    # play-time overrides for the eta ladder / prior ablations without
+    # re-exporting: VGC_JEPA_ETA=0 is the BC floor (v2-inside-v3),
+    # VGC_JEPA_SCORE_PRIOR=0 falls back to the factorized per-slot prior
+    import dataclasses
+    import os
+    eta = os.environ.get("VGC_JEPA_ETA")
+    sp = os.environ.get("VGC_JEPA_SCORE_PRIOR")
+    if eta is not None or sp is not None:
+        mjcfg = dataclasses.replace(
+            mjcfg,
+            solver_eta=float(eta) if eta is not None else mjcfg.solver_eta,
+            prior_from_score=(sp not in ("0", "false")) if sp is not None
+            else getattr(mjcfg, "prior_from_score", True))
+        print(f"[jepa-s] overrides: eta={mjcfg.solver_eta} "
+              f"score_prior={mjcfg.prior_from_score}", file=sys.stderr)
     bridge = None
     if getattr(mjcfg, "use_damage_features", False):
         try:
